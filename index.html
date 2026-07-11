@@ -2659,10 +2659,10 @@ scene.add(g);
     <div style="max-width:520px;text-align:center">
       <div style="font-size:2rem;margin-bottom:8px">🍕</div>
       <h2 style="font-size:1.6rem;letter-spacing:0.06em;margin-bottom:4px">Pizza Kingdom</h2>
-      <p style="color:#c8a8b8;font-size:0.85rem;margin-bottom:24px">Welcome, Princess Mana! Everyone here eats pizza cause that's someone's favourite food. What should we make today?</p>
+      <p style="color:#c8a8b8;font-size:0.85rem;margin-bottom:24px">Welcome, Princess Mana! What shall we make for you today?</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
         ${[
-          ['Mana Special 👑','Cheese, Tandoori Paneer, Capsicum....your usual'],
+          ['Mana Special 👑','Cheese, extra olives, mushrooms — your usual'],
           ['Fiesta Inferno 🌶️','Spicy peppers, jalapeños, red onion'],
           ['Garden Dream 🌿','Spinach, capsicum, cherry tomatoes, pesto'],
           ['Quattro Formaggi 🧀','Four cheeses, truffle oil, crispy base'],
@@ -3022,7 +3022,7 @@ g.add(diamond2);
           ['Daith 🌙','A crescent ring cradled in the inner ear fold'],
           ['Conch 🐚','A bold stud or hoop set in the ear bowl'],
           ['Flat ⭐','A flat-back stud on the upper cartilage plateau'],
-          ['Lobe 👑','Classic, timeless...but make it royal gold'],
+          ['Lobe 👑','Classic, timeless — but make it royal gold'],
         ].map(([name, desc]) => `
           <div style="
             padding:14px 10px;border-radius:12px;
@@ -3449,7 +3449,7 @@ g.add(makeHorse( 2.5, -1.5, 0x5c3317));
         font-size:0.95rem;line-height:1.9;color:#f0d8e8;text-align:left;
       ">
         <p>Hii Manu,</p><br>
-        <p>You've always talked about horses with this quiet excitement in your eyes like we haven't talked about it but i have seen your likes on reels soo it's a dream you almost forgot you had.</p><br>
+        <p>You've always talked about horses with this quiet excitement in your eyes like we haven't talked about itbut i have seen likes on reels soo it's a dream you almost forgot you had.</p><br>
         <p>So here they are. Two horses, waiting, on your birthday.</p><br>
         <p>One day we're going to actually do this...a small stable at our private land for us to experience on holidays and  a real ride through somewhere beautiful. I promise.</p><br>
         <p>Until then, happy birthday. This whole little world was made because you deserve magic, every day.</p><br>
@@ -4610,7 +4610,12 @@ g.add(makeHorse( 2.5, -1.5, 0x5c3317));
       // File missing/unsupported — fall back to the synthesized pad instead
       if (!usingRealFile) startSynthPad();
     }, { once: true });
-    bgAudio.play().catch(() => { /* will retry via canplaythrough/error */ });
+    bgAudio.play().then(() => {
+      console.log('[M7] Background music playing ✓');
+    }).catch(err => {
+      console.warn('[M7] Background music blocked by browser:', err.name, '— falling back to ambient pad. (Common cause: opening the link inside an app\'s built-in browser, e.g. WhatsApp/Instagram — try "Open in Browser/Safari/Chrome" instead.)');
+      if (!usingRealFile) startSynthPad();
+    });
   }
 
   // Gentle ascending chime — plays when a chest opens
