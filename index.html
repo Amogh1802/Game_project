@@ -80,23 +80,42 @@ const canvas   = document.getElementById('game-canvas');
 const IS_MOBILE = ('ontouchstart' in window) || navigator.maxTouchPoints > 0 ||
                    window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 
+// Tablets (iPad and similar) are touch devices but generally have far more
+// GPU/CPU headroom than a phone — use the smaller viewport dimension so
+// orientation doesn't matter (a tall phone in landscape shouldn't count).
+const IS_TABLET = IS_MOBILE && Math.min(window.innerWidth, window.innerHeight) >= 700;
+
+// Some phones (flagship-tier) also report enough cores to warrant the
+// same treatment as a tablet, even on a small screen.
+const IS_HIGH_END_MOBILE = IS_TABLET ||
+  (IS_MOBILE && navigator.hardwareConcurrency && navigator.hardwareConcurrency >= 6);
+
 // Low-end tier: weak CPUs/GPUs get a further-reduced quality pass.
 // hardwareConcurrency/deviceMemory aren't available on every browser,
 // so this only ever makes things *more* conservative, never assumes a
-// device is powerful when we simply don't know.
-const IS_LOW_END = IS_MOBILE && (
+// device is powerful when we simply don't know. Tablets are excluded —
+// a large touch screen is essentially never a low-end device.
+const IS_LOW_END = IS_MOBILE && !IS_TABLET && !IS_HIGH_END_MOBILE && (
   (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
   (navigator.deviceMemory && navigator.deviceMemory <= 4)
 );
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: !IS_MOBILE, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: !IS_MOBILE || IS_HIGH_END_MOBILE,
+  powerPreference: 'high-performance',
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_LOW_END ? 1 : (IS_MOBILE ? 1.5 : 2)));
+renderer.setPixelRatio(Math.min(
+  window.devicePixelRatio,
+  IS_LOW_END ? 1 : (IS_HIGH_END_MOBILE ? 2 : (IS_MOBILE ? 1.5 : 2))
+));
 // Shadow mapping is one of the single most expensive things a weak mobile
 // GPU can be asked to do (a whole extra depth pass + filtering per pixel) —
-// low-end devices skip it entirely rather than just shrinking it.
+// low-end devices skip it entirely rather than just shrinking it. Tablets
+// and high-end phones get the same soft shadows as desktop.
 renderer.shadowMap.enabled = !IS_LOW_END;
-renderer.shadowMap.type    = IS_MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+renderer.shadowMap.type    = (IS_MOBILE && !IS_HIGH_END_MOBILE) ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 renderer.toneMapping       = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 
@@ -365,7 +384,10 @@ const MOON_POS = new THREE.Vector3(80, 45, -120);
   moon.position.set(70, 45, -110);   // Match the moon position
   moon.castShadow = true;
 
-  moon.shadow.mapSize.set(IS_MOBILE ? 1024 : 2048, IS_MOBILE ? 1024 : 2048);
+  moon.shadow.mapSize.set(
+    (IS_MOBILE && !IS_HIGH_END_MOBILE) ? 1024 : 2048,
+    (IS_MOBILE && !IS_HIGH_END_MOBILE) ? 1024 : 2048
+  );
 
   moon.shadow.camera.near = 1;
   moon.shadow.camera.far = 250;
@@ -4418,13 +4440,16 @@ g.add(makeHorse( 2.5, -1.5, 0x5c3317));
   if (hint) hint.innerHTML = 'Joystick — move<br>✋ — interact';
 
   // ── Virtual joystick ───────────────────────────────────────
-  const JOY_SIZE  = 110;
-  const JOY_KNOB  = 46;
+  // Slightly larger on tablets (iPad etc.) so controls don't feel
+  // undersized relative to a much bigger screen.
+  const isTabletUI = Math.min(window.innerWidth, window.innerHeight) >= 700;
+  const JOY_SIZE  = isTabletUI ? 150 : 110;
+  const JOY_KNOB  = isTabletUI ? 62  : 46;
   const DEADZONE  = 0.28; // fraction of radius before a direction registers
 
   const joyBase = document.createElement('div');
   joyBase.style.cssText = `
-    position:fixed; left:26px; bottom:26px;
+    position:fixed; left:${isTabletUI ? 40 : 26}px; bottom:${isTabletUI ? 40 : 26}px;
     width:${JOY_SIZE}px; height:${JOY_SIZE}px; border-radius:50%;
     background:rgba(10,5,20,0.35); border:1px solid rgba(249,212,232,0.35);
     z-index:40; touch-action:none;
@@ -4440,13 +4465,14 @@ g.add(makeHorse( 2.5, -1.5, 0x5c3317));
   document.body.appendChild(joyBase);
 
   // ── Interact button ─────────────────────────────────────────
+  const BTN_SIZE = isTabletUI ? 92 : 72;
   const interactBtn = document.createElement('div');
   interactBtn.textContent = '✋';
   interactBtn.style.cssText = `
-    position:fixed; right:28px; bottom:34px;
-    width:72px; height:72px; border-radius:50%;
+    position:fixed; right:${isTabletUI ? 40 : 28}px; bottom:${isTabletUI ? 46 : 34}px;
+    width:${BTN_SIZE}px; height:${BTN_SIZE}px; border-radius:50%;
     background:rgba(10,5,20,0.45); border:1px solid rgba(249,212,232,0.4);
-    color:#f9d4e8; font-size:1.6rem;
+    color:#f9d4e8; font-size:${isTabletUI ? '2.1rem' : '1.6rem'};
     display:flex; align-items:center; justify-content:center;
     z-index:40; touch-action:none; user-select:none;
   `;
