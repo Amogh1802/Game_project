@@ -1,0 +1,4666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Happy Birthday Mana</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Georgia', serif; overscroll-behavior: none; touch-action: none; }
+    #game-canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+
+    #loading-screen {
+      position: absolute; inset: 0; background: #0a0a1a;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 100; transition: opacity 1s ease;
+    }
+    #loading-screen h1 { color: #f9d4e8; font-size: 2.4rem; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+    #loading-screen p  { color: #b89daa; font-size: 1rem; margin-bottom: 2rem; letter-spacing: 0.05em; }
+    .loading-bar-wrap  { width: 240px; height: 4px; background: #2a1a2e; border-radius: 4px; overflow: hidden; }
+    .loading-bar-fill  { height: 100%; width: 0%; background: linear-gradient(90deg, #d4a0c0, #f9d4e8); border-radius: 4px; transition: width 0.4s ease; }
+
+    #hud {
+      position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+      color: #f9d4e8; font-size: 0.85rem; letter-spacing: 0.1em;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.6); pointer-events: none;
+      opacity: 0; transition: opacity 1s ease;
+    }
+    #interact-prompt {
+      position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
+      background: rgba(10,5,20,0.75); color: #f9d4e8;
+      padding: 10px 24px; border-radius: 30px;
+      border: 1px solid rgba(249,212,232,0.3);
+      font-size: 0.9rem; letter-spacing: 0.06em;
+      pointer-events: none; opacity: 0; transition: opacity 0.3s ease;
+    }
+    #controls-hint {
+      position: absolute; bottom: 20px; right: 24px;
+      color: rgba(255,255,255,0.35); font-size: 0.72rem;
+      letter-spacing: 0.08em; pointer-events: none;
+      line-height: 1.8; text-align: right;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="game-canvas"></canvas>
+
+<div id="loading-screen">
+  <h1>Happy Birthday, Mana</h1>
+  <p>a little world made just for you</p>
+  <div class="loading-bar-wrap">
+    <div class="loading-bar-fill" id="loading-bar"></div>
+  </div>
+</div>
+
+<div id="hud">Enchanted Meadow</div>
+<div id="interact-prompt"></div>
+<div id="controls-hint">W A S D — move<br>Mouse drag — rotate camera<br>E — interact</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://unpkg.com/@emailjs/browser@4/dist/email.min.js"></script>
+<script>
+  (function() {
+    emailjs.init({ publicKey: 'PiwSZuasskT-AQZMB' });
+  })();
+</script>
+
+<script>
+/* ============================================================
+   M1 — SCENE FOUNDATION
+   Sky, ground, lighting, camera, render loop
+============================================================ */
+
+const canvas   = document.getElementById('game-canvas');
+
+// Detect touch/mobile devices up front so we can dial back GPU-heavy
+// settings (AA, shadow resolution, pixel ratio) where it matters most —
+// desktop rendering quality is untouched.
+const IS_MOBILE = ('ontouchstart' in window) || navigator.maxTouchPoints > 0 ||
+                   window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+
+// Low-end tier: weak CPUs/GPUs get a further-reduced quality pass.
+// hardwareConcurrency/deviceMemory aren't available on every browser,
+// so this only ever makes things *more* conservative, never assumes a
+// device is powerful when we simply don't know.
+const IS_LOW_END = IS_MOBILE && (
+  (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
+  (navigator.deviceMemory && navigator.deviceMemory <= 4)
+);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: !IS_MOBILE, powerPreference: 'high-performance' });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_LOW_END ? 1 : (IS_MOBILE ? 1.5 : 2)));
+// Shadow mapping is one of the single most expensive things a weak mobile
+// GPU can be asked to do (a whole extra depth pass + filtering per pixel) —
+// low-end devices skip it entirely rather than just shrinking it.
+renderer.shadowMap.enabled = !IS_LOW_END;
+renderer.shadowMap.type    = IS_MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.fog   = new THREE.FogExp2(0xc9dba8, 0.014);
+
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 400);
+camera.position.set(0, 3, 10);
+
+// ── Initialise window.GAME immediately so all sub-functions below can use it ──
+window.GAME = { scene, camera, renderer, clock: new THREE.Clock(), updaters: [] };
+
+// 🌌 Night Sky Gradient
+(function buildSky() {
+  const skyGeo = new THREE.SphereGeometry(300, 32, 32);
+
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+
+    uniforms: {
+
+      // Deep space
+      topColor: {
+        value: new THREE.Color(0x030712)
+      },
+
+      // Moonlit blue
+      midColor: {
+        value: new THREE.Color(0x10213d)
+      },
+
+      // Slight purple glow near horizon
+      bottomColor: {
+        value: new THREE.Color(0x1f1635)
+      },
+
+      offset: {
+        value: 28
+      },
+
+      exponent: {
+        value: 0.55
+      }
+
+    },
+
+    vertexShader: `
+      varying vec3 vWorldPosition;
+
+      void main() {
+
+        vec4 wp = modelMatrix * vec4(position,1.0);
+
+        vWorldPosition = wp.xyz;
+
+        gl_Position = projectionMatrix *
+                      modelViewMatrix *
+                      vec4(position,1.0);
+
+      }
+    `,
+
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 midColor;
+      uniform vec3 bottomColor;
+
+      uniform float offset;
+      uniform float exponent;
+
+      varying vec3 vWorldPosition;
+
+      void main() {
+
+        float h = normalize(vWorldPosition + offset).y;
+
+        float t = max(pow(max(h,0.0), exponent),0.0);
+
+        vec3 col = mix(
+            bottomColor,
+            midColor,
+            smoothstep(0.0,0.35,t)
+        );
+
+        col = mix(
+            col,
+            topColor,
+            smoothstep(0.35,1.0,t)
+        );
+
+        gl_FragColor = vec4(col,1.0);
+
+      }
+    `
+  });
+
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+})();
+
+// 🌕 Full Moon + Soft Glow
+(function buildMoon() {
+
+const MOON_POS = new THREE.Vector3(80, 45, -120);
+  // Outer glow
+  const halo = new THREE.Mesh(
+    new THREE.CircleGeometry(20, 48),
+    new THREE.MeshBasicMaterial({
+      color: 0xaecbff,
+      transparent: true,
+      opacity: 0.12,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    })
+  );
+  halo.position.copy(MOON_POS);
+  halo.lookAt(0, 0, 0);
+  scene.add(halo);
+
+  // Middle glow
+  const glow = new THREE.Mesh(
+    new THREE.CircleGeometry(13, 48),
+    new THREE.MeshBasicMaterial({
+      color: 0xdde9ff,
+      transparent: true,
+      opacity: 0.25,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    })
+  );
+  glow.position.copy(MOON_POS);
+  glow.lookAt(0, 0, 0);
+  scene.add(glow);
+
+  // Moon
+  const moon = new THREE.Mesh(
+    new THREE.CircleGeometry(6.5, 64),
+    new THREE.MeshBasicMaterial({
+      color: 0xf6f8ff,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    })
+  );
+  moon.position.copy(MOON_POS);
+  moon.lookAt(0, 0, 0);
+  scene.add(moon);
+
+  // Very subtle moon texture (craters)
+  const craterMat = new THREE.MeshBasicMaterial({
+    color: 0xd9ddea,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: false
+  });
+
+  [
+    [-1.5,1.0,0.65],
+    [1.2,-0.8,0.5],
+    [0.7,1.7,0.35],
+    [-2.0,-1.5,0.45],
+    [2.0,1.1,0.28]
+  ].forEach(([x,y,r]) => {
+
+    const crater = new THREE.Mesh(
+      new THREE.CircleGeometry(r,24),
+      craterMat
+    );
+
+    crater.position.set(
+      MOON_POS.x + x,
+      MOON_POS.y + y,
+      MOON_POS.z + 0.05
+    );
+
+    crater.lookAt(0,0,0);
+
+    scene.add(crater);
+
+  });
+
+  // Store moon position for lighting
+  window.GAME.sunPos = MOON_POS;
+
+})();
+
+// Clouds — fluffy layered puffs drifting slowly
+(function buildClouds() {
+  const cloudMat = new THREE.MeshLambertMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.82
+  });
+  const cloudList = [];
+
+  function makeCloud(x, y, z, scale) {
+    const g = new THREE.Group();
+    // Cluster of overlapping spheres for a fluffy look
+    const puffs = [
+      [0,    0,    0,    1.0],
+      [1.8,  0.2,  0.1,  0.78],
+      [-1.6, 0.18, 0,    0.72],
+      [0.8,  0.5,  0.5,  0.62],
+      [-0.6, 0.4, -0.4,  0.60],
+      [2.8,  0.05, 0.3,  0.52],
+      [-2.7, 0.05,-0.2,  0.50],
+      [0.3,  0.7,  0,    0.48],
+    ];
+    puffs.forEach(([dx, dy, dz, r]) => {
+      const puff = new THREE.Mesh(new THREE.SphereGeometry(r, 9, 6), cloudMat);
+      puff.scale.set(2.1, 0.65, 1.1);
+      puff.position.set(dx, dy, dz);
+      g.add(puff);
+    });
+    g.scale.setScalar(scale);
+    g.position.set(x, y, z);
+    g.userData.speed = 0.006 + Math.random() * 0.008;
+    g.userData.dir   = Math.random() > 0.5 ? 1 : -1;
+    scene.add(g);
+    cloudList.push(g);
+  }
+
+  // Spread clouds around the sky at various heights and distances
+  const cloudDefs = [
+    [ 60,  55, -90,  5.5], [-80,  60, -100, 6.0], [110,  50,  -60, 4.8],
+    [-50,  48,  -70, 5.2], [ 30,  65,  -120, 7.0], [-100, 58,  -80, 5.8],
+    [ 80,  52,   50, 4.5], [-70,  62,   60,  5.0], [  0,  58,  -110, 6.2],
+    [ 50,  45,   80, 4.2], [-90,  50,   40,  5.5], [ 20,  70,  -140, 6.8],
+    [-30,  55,  110, 5.0], [ 90,  60,  -30,  4.6], [-60,  65,  -50,  5.8],
+    [  0,  42,   70, 3.8], [130,  55,   20,  5.2], [-120, 60,   10,  6.0],
+    [ 40,  68, -150, 7.2], [-140, 52,  -20,  5.6],
+  ];
+  cloudDefs.forEach(([x, y, z, s]) => makeCloud(x, y, z, s));
+
+  // Drift clouds slowly
+  window.GAME.updaters.push(function() {
+    cloudList.forEach(cl => {
+      cl.position.x += cl.userData.speed * cl.userData.dir;
+      // Wrap around when they drift too far
+      if (cl.position.x >  200) cl.position.x = -200;
+      if (cl.position.x < -200) cl.position.x =  200;
+    });
+  });
+})();
+
+// Rolling ground
+(function buildGround() {
+  const geo = new THREE.PlaneGeometry(200, 200, 120, 120);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getY(i);
+    pos.setZ(i, Math.sin(x*0.12)*0.6 + Math.cos(z*0.15)*0.5 + Math.sin((x+z)*0.08)*0.4);
+  }
+  geo.computeVertexNormals();
+  geo.rotateX(-Math.PI / 2);
+  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x3d8c3a }));
+  ground.receiveShadow = true;
+  scene.add(ground);
+})();
+
+// 🌙 Night Lighting
+(function buildLights() {
+
+  // Soft moonlight everywhere
+  scene.add(new THREE.AmbientLight(0x6b7fb8, 0.35));
+
+  // Main Moon Light
+  const moon = new THREE.DirectionalLight(0xbfd8ff, 0.85);
+  moon.position.set(70, 45, -110);   // Match the moon position
+  moon.castShadow = true;
+
+  moon.shadow.mapSize.set(IS_MOBILE ? 1024 : 2048, IS_MOBILE ? 1024 : 2048);
+
+  moon.shadow.camera.near = 1;
+  moon.shadow.camera.far = 250;
+
+  moon.shadow.camera.left = -70;
+  moon.shadow.camera.right = 70;
+  moon.shadow.camera.top = 70;
+  moon.shadow.camera.bottom = -70;
+
+  moon.shadow.bias = -0.0003;
+
+  scene.add(moon);
+
+  // Very soft fill light so shadows aren't pitch black
+  const fill = new THREE.DirectionalLight(0x3b5fa5, 0.18);
+  fill.position.set(-40, 20, 20);
+  scene.add(fill);
+
+  // Night sky hemisphere
+  scene.add(
+    new THREE.HemisphereLight(
+      0x223b66,   // Sky
+      0x101018,   // Ground
+      0.18
+    )
+  );
+
+})();
+
+// Render loop
+(function animate() {
+  requestAnimationFrame(animate);
+  const delta   = window.GAME.clock.getDelta();      // MUST be first
+  const elapsed = window.GAME.clock.getElapsedTime(); // reads accumulated time
+
+  if (!window.playerReady) {
+    camera.position.x = Math.sin(elapsed * 0.15) * 2;
+    camera.lookAt(0, 1, 0);
+  }
+
+  window.GAME.updaters.forEach(fn => fn(elapsed, delta));
+  renderer.render(scene, camera);
+})();
+
+// Keep camera aspect & renderer size in sync with the viewport
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Loading screen
+(function() {
+  const bar = document.getElementById('loading-bar');
+  const screen = document.getElementById('loading-screen');
+  const hud = document.getElementById('hud');
+  let pct = 0;
+  const tick = setInterval(() => {
+    pct += Math.random() * 18;
+    bar.style.width = Math.min(pct, 100) + '%';
+    if (pct >= 100) {
+      clearInterval(tick);
+      setTimeout(() => {
+        screen.style.opacity = '0';
+        setTimeout(() => { screen.style.display = 'none'; hud.style.opacity = '1'; }, 1000);
+      }, 400);
+    }
+  }, 120);
+})();
+
+console.log('[M1] Scene foundation ready');
+</script>
+
+<script>
+/* ============================================================
+   M2 — TERRAIN DETAILS
+   Trees, flowers, grass tufts, dirt paths, boundary rocks
+============================================================ */
+(function buildTerrain() {
+  const scene = window.GAME.scene;
+
+  function groundY(x, z) {
+    return Math.sin(x*0.12)*0.6 + Math.cos(z*0.15)*0.5 + Math.sin((x+z)*0.08)*0.4;
+  }
+
+  function seededRand(seed) {
+    let s = seed;
+    return function() { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  }
+  const rand = seededRand(42);
+
+  // =====================================
+// Improved Walking Paths
+// =====================================
+
+const pathMat = new THREE.MeshLambertMaterial({
+  color: 0xb8924f
+});
+
+const edgeMat = new THREE.MeshLambertMaterial({
+  color: 0x8c6a38
+});
+
+[
+  [-28,-28],   // Pizza
+  [28,-28],    // Piercing
+  [0,32]       // Stable
+].forEach(([x2,z2]) => {
+
+  const dx = x2;
+  const dz = z2;
+  const len = Math.sqrt(dx*dx + dz*dz);
+  const angle = Math.atan2(dx, dz);
+
+  // Main Path
+  const path = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.8, len, 1, Math.ceil(len)),
+    pathMat
+  );
+
+  path.rotation.y = angle;   // rotate around world Y first...
+  path.rotateX(-Math.PI/2);  // ...then tilt flat in the now-rotated local frame
+  path.position.set(x2/2, 0.02, z2/2);
+  path.receiveShadow = true;
+  scene.add(path);
+
+  // Left Border
+  const leftEdge = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.18, len),
+    edgeMat
+  );
+
+  leftEdge.rotation.y = angle;
+  leftEdge.rotateX(-Math.PI/2);
+  leftEdge.position.set(x2/2, 0.025, z2/2);
+  leftEdge.translateX(-1.45);
+
+  scene.add(leftEdge);
+
+  // Right Border
+  const rightEdge = leftEdge.clone();
+  rightEdge.translateX(2.9);
+  scene.add(rightEdge);
+
+});
+
+// =============================
+// Trees — instanced for performance
+// =============================
+// Every tree of a given type (oak/pine/cherry) shares the exact same
+// local part layout — only world position, facing, per-tree scale, and
+// (for deco) small random offsets differ. Instead of building ~700 real
+// meshes across 45 trees, we collect transforms and draw everything
+// through a couple dozen InstancedMesh calls.
+
+const treePartDummy = new THREE.Object3D();
+function treeLocalMat(px, py, pz, ry) {
+  treePartDummy.position.set(px, py, pz);
+  treePartDummy.rotation.set(0, ry || 0, 0);
+  treePartDummy.updateMatrix();
+  return treePartDummy.matrix.clone();
+}
+
+const treeBuckets = [];
+function makeTreeBucket(geometry, color, castShadow) {
+  const mat = new THREE.MeshLambertMaterial({ color });
+  const bucket = { geometry, material: mat, castShadow: !!castShadow, entries: [] };
+  treeBuckets.push(bucket);
+  return bucket;
+}
+
+// Shared trunk — identical geometry/color across all tree types
+const trunkGeo    = new THREE.CylinderGeometry(0.22, 0.28, 1.8, 8);
+const trunkBucket = makeTreeBucket(trunkGeo, 0x6b4423, true);
+const trunkLocal  = treeLocalMat(0, 0.9, 0);
+
+// Oak leaf slots — (localX, localY, localZ, radius, color)
+const oakLeafDefs = [
+  [0, 2.3, 0, 1.2, 0x3b8d3b],
+  [-0.6, 3.0, 0.2, 0.9, 0x4ca64c],
+  [0.6, 3.0, -0.2, 0.9, 0x4ca64c],
+  [0, 3.8, 0, 0.8, 0x5fbf5f],
+];
+const oakGeoCache = {}, oakBucketByKey = {};
+oakLeafDefs.forEach(([lx, ly, lz, r, c]) => {
+  const key = r + ':' + c;
+  if (!oakBucketByKey[key]) {
+    if (!oakGeoCache[r]) oakGeoCache[r] = new THREE.SphereGeometry(r, 10, 10);
+    oakBucketByKey[key] = makeTreeBucket(oakGeoCache[r], c, false);
+  }
+});
+const oakLeafSlots = oakLeafDefs.map(([lx, ly, lz, r, c]) => ({
+  bucket: oakBucketByKey[r + ':' + c],
+  local: treeLocalMat(lx, ly, lz, 0),
+}));
+
+// Pine cone slots — (radius, height, localY, color)
+const pineConeDefs = [
+  [1.2, 1.5, 2.0, 0x2d6e38],
+  [0.95, 1.3, 3.0, 0x3d8a45],
+  [0.7, 1.2, 3.8, 0x4ca64c],
+];
+const pineConeSlots = pineConeDefs.map(([r, h, y, c]) => ({
+  bucket: makeTreeBucket(new THREE.ConeGeometry(r, h, 8), c, false),
+  local: treeLocalMat(0, y, 0),
+}));
+
+// Cherry blossom slots — (localX, localY, localZ, radius), shared color
+const cherryBlossomDefs = [
+  [0, 2.5, 0, 1.2],
+  [-0.6, 3.2, 0.2, 0.9],
+  [0.6, 3.2, -0.2, 0.9],
+  [0, 4.0, 0, 0.75],
+];
+const cherryBucketByR = {};
+cherryBlossomDefs.forEach(([lx, ly, lz, r]) => {
+  if (!cherryBucketByR[r]) {
+    cherryBucketByR[r] = makeTreeBucket(new THREE.SphereGeometry(r, 10, 10), 0xffb6d9, true);
+  }
+});
+const cherryBlossomSlots = cherryBlossomDefs.map(([lx, ly, lz, r]) => ({
+  bucket: cherryBucketByR[r],
+  local: treeLocalMat(lx, ly, lz, 0),
+}));
+
+// ── Ground decoration buckets — NOT affected by tree scale (matches original) ──
+const decoGrassGeo    = new THREE.BoxGeometry(0.05, 1, 0.05); // unit height, scaled per-instance
+const decoGrassBucket = makeTreeBucket(decoGrassGeo, 0x3f8f3f, false);
+
+const decoFlowerColors  = [0xff69b4, 0xffffff, 0xffeb3b, 0xb388ff];
+const decoFlowerGeo     = new THREE.SphereGeometry(0.07, 6, 6);
+const decoFlowerBuckets = decoFlowerColors.map(c => makeTreeBucket(decoFlowerGeo, c, false));
+
+const mushroomStemGeo    = new THREE.CylinderGeometry(0.03, 0.03, 0.12, 6);
+const mushroomStemBucket = makeTreeBucket(mushroomStemGeo, 0xf5e6c8, false);
+const mushroomCapGeo     = new THREE.SphereGeometry(0.08, 8, 8);
+mushroomCapGeo.scale(1, 0.5, 1);
+const mushroomCapBucket  = makeTreeBucket(mushroomCapGeo, 0xd63b3b, false);
+
+const rockGeo    = new THREE.DodecahedronGeometry(0.12, 0);
+const rockBucket = makeTreeBucket(rockGeo, 0x888888, false);
+
+// rand() call order/count below matches the original makeTree exactly
+// (type, rotation, grass x6, flowers x3, mushroom, rock) so every
+// downstream random placement is completely unaffected by this refactor.
+function addTree(x, z, scale) {
+  const type = Math.floor(rand() * 3);
+  const treeY = groundY(x, z);
+  const rotY  = rand() * Math.PI * 2;
+
+  // Parent transform for trunk/foliage — position + rotation + tree scale
+  const parentDummy = new THREE.Object3D();
+  parentDummy.position.set(x, treeY, z);
+  parentDummy.rotation.set(0, rotY, 0);
+  parentDummy.scale.set(scale, scale, scale);
+  parentDummy.updateMatrix();
+  const scaledParent = parentDummy.matrix;
+
+  const finalMat = new THREE.Matrix4();
+  finalMat.multiplyMatrices(scaledParent, trunkLocal);
+  trunkBucket.entries.push(finalMat.clone());
+
+  const slots = type === 0 ? oakLeafSlots : type === 1 ? pineConeSlots : cherryBlossomSlots;
+  slots.forEach(slot => {
+    finalMat.multiplyMatrices(scaledParent, slot.local);
+    slot.bucket.entries.push(finalMat.clone());
+  });
+
+  // Parent transform for deco — position + rotation only, NO scale (matches original)
+  const decoParentDummy = new THREE.Object3D();
+  decoParentDummy.position.set(x, treeY, z);
+  decoParentDummy.rotation.set(0, rotY, 0);
+  decoParentDummy.updateMatrix();
+  const decoParent = decoParentDummy.matrix;
+
+  // Tall grass — 6 blades
+  const localDummy = new THREE.Object3D();
+  for (let i = 0; i < 6; i++) {
+    const h = 0.35 + rand() * 0.2;
+    const a = rand() * Math.PI * 2;
+    const r = 0.8 + rand() * 0.7;
+    localDummy.position.set(Math.cos(a) * r, 0.18, Math.sin(a) * r);
+    localDummy.rotation.set(0, 0, 0);
+    localDummy.scale.set(1, h, 1);
+    localDummy.updateMatrix();
+    finalMat.multiplyMatrices(decoParent, localDummy.matrix);
+    decoGrassBucket.entries.push(finalMat.clone());
+  }
+
+  // Flowers — 3
+  for (let i = 0; i < 3; i++) {
+    const colorIdx = Math.floor(rand() * 4);
+    const a = rand() * Math.PI * 2;
+    const r = 0.5 + rand() * 0.8;
+    const local = treeLocalMat(Math.cos(a) * r, 0.22, Math.sin(a) * r, 0);
+    finalMat.multiplyMatrices(decoParent, local);
+    decoFlowerBuckets[colorIdx].entries.push(finalMat.clone());
+  }
+
+  // Mushroom
+  if (rand() > 0.45) {
+    const mx = (rand() - 0.5) * 1.2;
+    const mz = (rand() - 0.5) * 1.2;
+    finalMat.multiplyMatrices(decoParent, treeLocalMat(mx, 0.06, mz, 0));
+    mushroomStemBucket.entries.push(finalMat.clone());
+    finalMat.multiplyMatrices(decoParent, treeLocalMat(mx, 0.14, mz, 0));
+    mushroomCapBucket.entries.push(finalMat.clone());
+  }
+
+  // Small rock
+  if (rand() > 0.55) {
+    const rx = (rand() - 0.5);
+    const rz = (rand() - 0.5);
+    const rrot = rand() * Math.PI;
+    finalMat.multiplyMatrices(decoParent, treeLocalMat(rx, 0.08, rz, rrot));
+    rockBucket.entries.push(finalMat.clone());
+  }
+}
+
+// =============================
+// Forest Layout
+// =============================
+
+const treeLocations = [
+
+  // ---------- Northwest ----------
+  [-48,-30],[-45,-20],[-43,-10],[-40,0],[-42,12],[-38,22],[-46,30],
+
+  // ---------- Northeast ----------
+  [48,-30],[45,-20],[43,-10],[40,0],[42,12],[38,22],[46,30],
+
+  // ---------- South ----------
+  [-28,-46],[-18,-42],[-8,-45],[8,-45],[18,-42],[28,-46],
+
+  // ---------- North ----------
+  [-26,46],[-16,42],[-6,45],[6,45],[16,42],[26,46],
+
+  // ---------- Stable Area ----------
+  [-14,24],[-8,28],[8,28],[14,24],
+
+  // ---------- Pizza Area ----------
+  [-42,-42],[-34,-36],[-30,-46],
+
+  // ---------- Piercing Area ----------
+  [42,-42],[34,-36],[30,-46],
+
+  // ---------- Random Fill ----------
+  [-50,10],[-50,-10],
+  [50,10],[50,-10],
+  [-30,36],[30,36]
+];
+
+treeLocations.forEach(([x,z]) => {
+
+  addTree(
+    x + (rand()-0.5)*2,
+    z + (rand()-0.5)*2,
+    0.8 + rand()*0.45
+  );
+
+});
+
+// Build one InstancedMesh per non-empty bucket
+treeBuckets.forEach(bucket => {
+  if (!bucket.entries.length) return;
+  const mesh = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.entries.length);
+  mesh.castShadow = bucket.castShadow;
+  mesh.receiveShadow = false;
+  bucket.entries.forEach((m, i) => mesh.setMatrixAt(i, m));
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+});
+
+  // ── Realistic Grass Tufts — instanced for performance ──────
+  // Every blade across all 420 tufts shares one unit PlaneGeometry.
+  // Instead of ~5,500 individual THREE.Mesh draw calls, all blades of
+  // the same shade are drawn together via a single InstancedMesh —
+  // same look, same per-tuft wind sway, far fewer draw calls.
+  const grassShadeColors = [0x2d7a1f, 0x3a9426, 0x4db030, 0x56c23a, 0x6dcc44, 0x8fce5a, 0xb5e878];
+  const unitBladeGeo = new THREE.PlaneGeometry(1, 1);
+
+  const tuftDefs = [];                                   // { baseX, baseZ, baseY, phase, speed }
+  const bladesByColor = grassShadeColors.map(() => []);  // per shade: { tuftIdx, matrix }
+  const baseCircles = [];                                 // { tuftIdx, radius, segments, color }
+  const bladeDummy = new THREE.Object3D();
+
+  function addBlade(tuftIdx, colorIdx, x, y, z, w, h, rotY, rotZ) {
+    bladeDummy.position.set(x, y, z);
+    bladeDummy.rotation.set(0, rotY, rotZ);
+    bladeDummy.scale.set(w, h, 1);
+    bladeDummy.updateMatrix();
+    bladesByColor[colorIdx].push({ tuftIdx, matrix: bladeDummy.matrix.clone() });
+  }
+
+  // Type A — thin tall sparse blades
+  function makeGrassTuftA(x, z) {
+    const tuftIdx = tuftDefs.length;
+    const count = 5 + Math.floor(rand() * 4);
+    for (let j = 0; j < count; j++) {
+      const h = 0.45 + rand() * 0.55;
+      const w = 0.04 + rand() * 0.03;
+      const rotY = (j / count) * Math.PI * 2 + rand() * 0.6;
+      const rotZ = (rand() - 0.5) * 0.8;
+      addBlade(tuftIdx, Math.floor(rand() * 4), (rand()-0.5)*0.15, h/2, (rand()-0.5)*0.15, w, h, rotY, rotZ);
+    }
+    tuftDefs.push({ baseX: x, baseZ: z, baseY: groundY(x,z), phase: rand()*Math.PI*2, speed: 0.5+rand()*0.5 });
+  }
+
+  // Type B — short dense clump
+  function makeGrassTuftB(x, z) {
+    const tuftIdx = tuftDefs.length;
+    const count = 10 + Math.floor(rand() * 6);
+    for (let j = 0; j < count; j++) {
+      const h = 0.18 + rand() * 0.22;
+      const w = 0.05 + rand() * 0.04;
+      const rotY = rand() * Math.PI * 2;
+      const rotZ = (rand() - 0.5) * 0.5;
+      addBlade(tuftIdx, Math.floor(rand() * grassShadeColors.length), (rand()-0.5)*0.28, h/2, (rand()-0.5)*0.28, w, h, rotY, rotZ);
+    }
+    baseCircles.push({ tuftIdx, radius: 0.2, segments: 6, color: 0x1e5c14 });
+    tuftDefs.push({ baseX: x, baseZ: z, baseY: groundY(x,z), phase: rand()*Math.PI*2, speed: 0.4+rand()*0.4 });
+  }
+
+  // Type C — wide spreading patch with height gradient (light tips)
+  function makeGrassTuftC(x, z) {
+    const tuftIdx = tuftDefs.length;
+    const count = 14 + Math.floor(rand() * 8);
+    for (let j = 0; j < count; j++) {
+      const h = 0.25 + rand() * 0.4;
+      const shadeIdx = Math.min(Math.floor((h / 0.65) * 5) + 2, grassShadeColors.length-1);
+      const rotY = rand() * Math.PI * 2;
+      const rotZ = (rand() - 0.5) * 0.6;
+      addBlade(tuftIdx, shadeIdx, (rand()-0.5)*0.38, h/2, (rand()-0.5)*0.38, 0.05, h, rotY, rotZ);
+    }
+    baseCircles.push({ tuftIdx, radius: 0.28, segments: 7, color: 0x235e14 });
+    tuftDefs.push({ baseX: x, baseZ: z, baseY: groundY(x,z), phase: rand()*Math.PI*2, speed: 0.35+rand()*0.35 });
+  }
+
+  // Mix all three types
+  const tuftFns = [makeGrassTuftA, makeGrassTuftB, makeGrassTuftC];
+  for (let i = 0; i < 420; i++) {
+    const a = rand()*Math.PI*2, r = 2 + rand()*50;
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    tuftFns[Math.floor(rand()*3)](x, z);
+  }
+
+  // Build one InstancedMesh per grass shade holding every blade of that color
+  const grassBladeMeshes = []; // { mesh, entries: [{tuftIdx, matrix}] }
+  bladesByColor.forEach((entries, colorIdx) => {
+    if (!entries.length) return;
+    const mat = new THREE.MeshLambertMaterial({ color: grassShadeColors[colorIdx], side: THREE.DoubleSide });
+    const mesh = new THREE.InstancedMesh(unitBladeGeo, mat, entries.length);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    entries.forEach((e, i) => mesh.setMatrixAt(i, e.matrix));
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    grassBladeMeshes.push({ mesh, entries });
+  });
+
+  // Base circles under dense/wide tufts — static, grouped by color into InstancedMeshes
+  const circlesByColor = {};
+  baseCircles.forEach(c => {
+    if (!circlesByColor[c.color]) circlesByColor[c.color] = { radius: c.radius, segments: c.segments, items: [] };
+    circlesByColor[c.color].items.push(c);
+  });
+  Object.entries(circlesByColor).forEach(([colorHex, group]) => {
+    const geo = new THREE.CircleGeometry(group.radius, group.segments);
+    const mat = new THREE.MeshLambertMaterial({ color: Number(colorHex) });
+    const mesh = new THREE.InstancedMesh(geo, mat, group.items.length);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    const d = new THREE.Object3D();
+    group.items.forEach((c, i) => {
+      const t = tuftDefs[c.tuftIdx];
+      d.position.set(t.baseX, t.baseY + 0.01, t.baseZ);
+      d.rotation.set(-Math.PI/2, 0, 0);
+      d.updateMatrix();
+      mesh.setMatrixAt(i, d.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+  });
+
+  // ── Tulips + Lilies — instanced for performance ────────────
+  // Same trick as the grass: every tulip/lily is built from fixed-shape
+  // "parts" (stem, leaves, petals...) at fixed local offsets — only
+  // position, facing, sway timing, and color vary per flower. Instead of
+  // ~1,340 individual meshes, everything draws through ~26 InstancedMesh
+  // calls, bucketed by color where color varies (petals/inner cup).
+  const tulipColors = [0xff1744, 0xff4081, 0xf50057, 0xff6d00, 0xaa00ff, 0xffd600, 0xffffff];
+  const lilyColors  = [0xff80ab, 0xce93d8, 0xfff9c4, 0xffcc80, 0xb2dfdb, 0xf48fb1];
+
+  const flowerDefs = []; // { baseX, baseZ, baseY, baseRotY, phase, speed }
+  const partDummy  = new THREE.Object3D();
+  function localMat(px, py, pz, rx, ry, rz) {
+    partDummy.position.set(px, py, pz);
+    partDummy.rotation.set(rx, ry, rz);
+    partDummy.updateMatrix();
+    return partDummy.matrix.clone();
+  }
+
+  const flowerBuckets = [];
+  function makeBucket(geometry, color, opts) {
+    const mat = new THREE.MeshLambertMaterial(Object.assign({ color }, opts || {}));
+    const bucket = { geometry, material: mat, entries: [] };
+    flowerBuckets.push(bucket);
+    return bucket;
+  }
+
+  // ── Tulip part templates (fixed local shape, same for every tulip) ──
+  const tulipStemGeo = new THREE.CylinderGeometry(0.025, 0.035, 0.7, 6);
+  const tulipLeafGeo = new THREE.CylinderGeometry(0.01, 0.06, 0.35, 5);
+  const tulipPetalGeo = new THREE.SphereGeometry(0.1, 6, 7);
+  tulipPetalGeo.scale(0.55, 1.2, 0.55);
+  const tulipInnerGeo = new THREE.SphereGeometry(0.09, 7, 7);
+  tulipInnerGeo.scale(1, 0.9, 1);
+
+  const tulipStemBucket   = makeBucket(tulipStemGeo, 0x2e7d32);
+  const tulipLeafBucket   = makeBucket(tulipLeafGeo, 0x388e3c);
+  const tulipPetalBuckets = tulipColors.map(c => makeBucket(tulipPetalGeo, c));
+  const tulipInnerBuckets = tulipColors.map(c => makeBucket(tulipInnerGeo, new THREE.Color(c).multiplyScalar(0.7)));
+
+  const tulipStemLocal   = localMat(0, 0.35, 0, 0, 0, 0);
+  const tulipLeafLocals  = [-1, 1].map(side => localMat(side*0.1, 0.3, 0, 0.3, 0, side*0.6));
+  const tulipInnerLocal  = localMat(0, 0.72, 0, 0, 0, 0);
+  const tulipPetalLocals = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = (i/6) * Math.PI * 2;
+    tulipPetalLocals.push(localMat(Math.cos(angle)*0.09, 0.76, Math.sin(angle)*0.09, -0.25, angle, Math.cos(angle)*0.2));
+  }
+
+  // ── Lily part templates ──────────────────────────────────────────
+  const lilyStemGeo   = new THREE.CylinderGeometry(0.02, 0.03, 0.6, 6);
+  const lilyLeafGeo   = new THREE.CylinderGeometry(0.005, 0.04, 0.5, 5);
+  const lilyPetalGeo  = new THREE.CylinderGeometry(0.01, 0.08, 0.36, 5);
+  const lilyStamenGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.22, 4);
+  const lilyAntherGeo = new THREE.SphereGeometry(0.016, 4, 4);
+
+  const lilyStemBucket   = makeBucket(lilyStemGeo, 0x1b5e20);
+  const lilyLeafBucket   = makeBucket(lilyLeafGeo, 0x2e7d32);
+  const lilyPetalBuckets = lilyColors.map(c => makeBucket(lilyPetalGeo, c, { side: THREE.DoubleSide }));
+  const lilyStamenBucket = makeBucket(lilyStamenGeo, 0xffd600);
+  const lilyAntherBucket = makeBucket(lilyAntherGeo, 0xff6f00);
+
+  const lilyStemLocal  = localMat(0, 0.3, 0, 0, 0, 0);
+  const lilyLeafLocals = [-1, 1].map(side => localMat(side*0.12, 0.22, 0.05, -0.2, 0, side*0.8));
+  const lilyPetalLocals = [], lilyStamenLocals = [], lilyAntherLocals = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = (i/6) * Math.PI * 2;
+    lilyPetalLocals.push(localMat(Math.cos(angle)*0.14, 0.65, Math.sin(angle)*0.14, -Math.sin(angle)*0.9, angle, Math.cos(angle)*0.9));
+    lilyStamenLocals.push(localMat(Math.cos(angle)*0.04, 0.69, Math.sin(angle)*0.04, -Math.sin(angle)*0.4, 0, Math.cos(angle)*0.4));
+    lilyAntherLocals.push(localMat(Math.cos(angle)*0.06, 0.78, Math.sin(angle)*0.06, 0, 0, 0));
+  }
+
+  // rand() call order/count per flower matches the original makeTulip/makeLily
+  // exactly (rotation.y, then phase, then speed) so every downstream random
+  // placement (rocks, etc.) is completely unaffected by this refactor.
+  function addFlower(type, x, z, color) {
+    const flowerIdx = flowerDefs.length;
+    flowerDefs.push({
+      baseX: x, baseZ: z, baseY: groundY(x, z),
+      baseRotY: rand() * Math.PI * 2,
+      phase: rand() * Math.PI * 2,
+      speed: type === 'tulip' ? (0.3 + rand()*0.4) : (0.25 + rand()*0.35),
+    });
+
+    if (type === 'tulip') {
+      const colorIdx = tulipColors.indexOf(color);
+      tulipStemBucket.entries.push({ flowerIdx, matrix: tulipStemLocal });
+      tulipLeafLocals.forEach(m => tulipLeafBucket.entries.push({ flowerIdx, matrix: m }));
+      tulipPetalLocals.forEach(m => tulipPetalBuckets[colorIdx].entries.push({ flowerIdx, matrix: m }));
+      tulipInnerBuckets[colorIdx].entries.push({ flowerIdx, matrix: tulipInnerLocal });
+    } else {
+      const colorIdx = lilyColors.indexOf(color);
+      lilyStemBucket.entries.push({ flowerIdx, matrix: lilyStemLocal });
+      lilyLeafLocals.forEach(m => lilyLeafBucket.entries.push({ flowerIdx, matrix: m }));
+      lilyPetalLocals.forEach(m => lilyPetalBuckets[colorIdx].entries.push({ flowerIdx, matrix: m }));
+      lilyStamenLocals.forEach(m => lilyStamenBucket.entries.push({ flowerIdx, matrix: m }));
+      lilyAntherLocals.forEach(m => lilyAntherBucket.entries.push({ flowerIdx, matrix: m }));
+    }
+  }
+
+  // ── Place flowers across the meadow ───────────────────────
+  const CLEAR_ZONES = [
+    [0, 0, 7],         // fountain center
+    [-28, -28, 8],     // pizza
+    [28, -28, 8],      // piercing
+    [0, 32, 8],        // stable
+  ];
+
+  function isClear(x, z) {
+    return CLEAR_ZONES.every(([cx, cz, r]) => Math.sqrt((x-cx)**2 + (z-cz)**2) > r);
+  }
+
+  // Tulips — 50 of them in clusters
+  for (let i = 0; i < 50; i++) {
+    const a = rand() * Math.PI * 2;
+    const r = 4 + rand() * 44;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (!isClear(x, z)) continue;
+    const color = tulipColors[Math.floor(rand() * tulipColors.length)];
+    addFlower('tulip', x, z, color);
+  }
+
+  // Lilies — 40 of them spread around
+  for (let i = 0; i < 40; i++) {
+    const a = rand() * Math.PI * 2;
+    const r = 4 + rand() * 44;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (!isClear(x, z)) continue;
+    const color = lilyColors[Math.floor(rand() * lilyColors.length)];
+    addFlower('lily', x, z, color);
+  }
+
+  // Build one InstancedMesh per bucket
+  flowerBuckets.forEach(bucket => {
+    if (!bucket.entries.length) return;
+    const mesh = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.entries.length);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    bucket.entries.forEach((e, i) => mesh.setMatrixAt(i, e.matrix));
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    bucket.mesh = mesh;
+  });
+
+  // ── Gentle sway animation for all flowers + grass ─────────
+  const grassSwayDummy = new THREE.Object3D();
+  const grassFinalMat = new THREE.Matrix4();
+
+  window.GAME.updaters.push(function(elapsed) {
+    // Flowers: recompute each flower's rigid sway rotation once, reuse
+    // it for every part belonging to that flower.
+    const flowerMatrices = flowerDefs.map(f => {
+      const sway = Math.sin(elapsed * f.speed + f.phase) * 0.055;
+      grassSwayDummy.position.set(f.baseX, f.baseY, f.baseZ);
+      grassSwayDummy.rotation.set(0, f.baseRotY, sway);
+      grassSwayDummy.updateMatrix();
+      return grassSwayDummy.matrix.clone();
+    });
+    flowerBuckets.forEach(bucket => {
+      if (!bucket.mesh) return;
+      bucket.entries.forEach((e, i) => {
+        grassFinalMat.multiplyMatrices(flowerMatrices[e.flowerIdx], e.matrix);
+        bucket.mesh.setMatrixAt(i, grassFinalMat);
+      });
+      bucket.mesh.instanceMatrix.needsUpdate = true;
+    });
+
+    // Recompute each tuft's rigid sway rotation once, then reuse it for
+    // every blade in that tuft — a handful of matrix multiplies instead
+    // of thousands of separate per-mesh rotation updates + draw calls.
+    const tuftMatrices = tuftDefs.map(t => {
+      const sway = Math.sin(elapsed * t.speed + t.phase) * 0.08;
+      grassSwayDummy.position.set(t.baseX, t.baseY, t.baseZ);
+      grassSwayDummy.rotation.set(0, 0, sway);
+      grassSwayDummy.updateMatrix();
+      return grassSwayDummy.matrix.clone();
+    });
+
+    grassBladeMeshes.forEach(({ mesh, entries }) => {
+      entries.forEach((e, i) => {
+        grassFinalMat.multiplyMatrices(tuftMatrices[e.tuftIdx], e.matrix);
+        mesh.setMatrixAt(i, grassFinalMat);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+    });
+  });
+
+  // Boundary rocks
+  for (let i=0; i<30; i++) {
+    const a=(i/30)*Math.PI*2, r=52+rand()*4;
+    const x=Math.cos(a)*r, z=Math.sin(a)*r;
+    const m = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(0.5+rand()*0.6, 0),
+      new THREE.MeshLambertMaterial({ color: 0x8d8d7a })
+    );
+    m.castShadow = false;
+    m.position.set(x, groundY(x,z)+0.3, z);
+    m.rotation.set(rand()*2, rand()*2, rand()*2);
+    scene.add(m);
+  }
+
+  // ── Bushes — small, natural, varied ──────────────────────
+  function makeBush(x, z, scale) {
+    const g = new THREE.Group();
+    // Keep scale small — max 0.55
+    const s = Math.min(scale, 0.55);
+    const baseColors = [0x2d6e2d, 0x357a35, 0x3d8c3d, 0x2a5e2a];
+    const tipColors  = [0x4db030, 0x5ec93a, 0x6dcc44, 0x45a030];
+
+    // 3-4 spheres only — no more giant clusters
+    const puffs = [
+      [0,    0,    0.9],
+      [s*0.6, s*0.15, 0.65],
+      [-s*0.55, s*0.12, 0.62],
+      [s*0.1, s*0.3, 0.5],
+    ];
+    puffs.forEach(([dx, dy, dr], i) => {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(dr * s, 6, 5),
+        new THREE.MeshLambertMaterial({ color: i === 0 ? baseColors[Math.floor(rand()*baseColors.length)] : tipColors[Math.floor(rand()*tipColors.length)] })
+      );
+      mesh.position.set(dx, dy + s*0.45, 0);
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      g.add(mesh);
+    });
+
+    // 2-3 tiny flower dots max
+    const flCount = Math.floor(rand()*3);
+    for (let i = 0; i < flCount; i++) {
+      const a = rand()*Math.PI*2;
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.04, 4, 3),
+        new THREE.MeshLambertMaterial({ color: [0xff85c1,0xffffff,0xffeb3b][Math.floor(rand()*3)] }));
+      dot.position.set(Math.cos(a)*s*0.6, s*0.85, Math.sin(a)*s*0.3);
+      dot.castShadow = false;
+      dot.receiveShadow = false;
+      g.add(dot);
+    }
+
+    g.position.set(x, groundY(x,z), z);
+    g.rotation.y = rand()*Math.PI*2;
+    scene.add(g);
+  }
+
+  // Fewer bushes, kept small (scale 0.25–0.5)
+  for (let i = 0; i < 30; i++) {
+    const a = rand()*Math.PI*2, r = 6 + rand()*44;
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    if (!isClear(x, z)) continue;
+    makeBush(x, z, 0.25 + rand()*0.28);
+  }
+
+  // ── Extra scattered rocks ─────────────────────────────────
+  const rockColors = [0x8d8d7a, 0x9e9e8a, 0x7a7a6a, 0xb0a890];
+  for (let i = 0; i < 35; i++) {
+    const a = rand()*Math.PI*2, r = 4 + rand()*46;
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    const size = 0.15 + rand()*0.45;
+    const rock = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(size, 0),
+      new THREE.MeshLambertMaterial({ color: rockColors[Math.floor(rand()*rockColors.length)] })
+    );
+    rock.position.set(x, groundY(x,z) + size*0.4, z);
+    rock.rotation.set(rand()*3, rand()*3, rand()*3);
+    rock.castShadow = false;
+    rock.receiveShadow = false;
+    scene.add(rock);
+  }
+
+// ── Fireflies ──────────────────────────────────────────────
+const butterflies = [];
+
+function makeButterfly(x, y, z) {
+
+  const g = new THREE.Group();
+
+  // Glowing core
+  const glow = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 8, 8),
+    new THREE.MeshBasicMaterial({
+      color: 0xfff7a0,
+      transparent: true,
+      opacity: 1
+    })
+  );
+  glow.castShadow = false;
+  glow.receiveShadow = false;
+
+  g.add(glow);
+
+  // Soft glow halo
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 10, 10),
+    new THREE.MeshBasicMaterial({
+      color: 0xfff0a0,
+      transparent: true,
+      opacity: 0.25,
+      depthWrite: false
+    })
+  );
+  halo.castShadow = false;
+  halo.receiveShadow = false;
+
+  g.add(halo);
+
+  g.position.set(x, y, z);
+
+  g.userData.centerX = x;
+  g.userData.centerZ = z;
+  g.userData.baseY = y;
+
+  g.userData.phase = rand() * Math.PI * 2;
+  g.userData.speed = 0.25 + rand() * 0.35;
+  g.userData.radius = 1 + rand() * 2;
+  g.userData.blink = rand() * Math.PI * 2;
+
+  scene.add(g);
+
+  butterflies.push(g);
+
+}
+
+for (let i = 0; i < 45; i++) {
+
+  const a = rand() * Math.PI * 2;
+  const r = 5 + rand() * 35;
+
+  makeButterfly(
+    Math.cos(a) * r,
+    0.7 + rand() * 1.8,
+    Math.sin(a) * r
+  );
+
+}
+
+  // ── Birds (simple V-shape silhouettes gliding high) ───────
+  const birds = [];
+  function makeBird(x, y, z) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ color: 0x2c2c2c, side: THREE.DoubleSide });
+    // Two curved wings
+    [-1,1].forEach(side => {
+      const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.12), mat);
+      wing.position.set(side*0.28, 0, 0);
+      wing.rotation.z = side * 0.3;
+      wing.rotation.y = side * 0.15;
+      wing.castShadow = false;
+      wing.receiveShadow = false;
+      g.add(wing);
+    });
+    g.position.set(x, y, z);
+    g.userData.phase  = rand()*Math.PI*2;
+    g.userData.speed  = 0.15 + rand()*0.1;
+    g.userData.radius = 20 + rand()*25;
+    g.userData.baseY  = y;
+    g.userData.wingPhase = rand()*Math.PI*2;
+    scene.add(g);
+    birds.push(g);
+  }
+
+  for (let i = 0; i < 8; i++) {
+    makeBird((rand()-0.5)*60, 18 + rand()*14, (rand()-0.5)*60);
+  }
+
+// ── Animate butterflies + birds ───────────────────────────
+window.GAME.updaters.push(function(elapsed) {
+
+    butterflies.forEach(bf => {
+
+        const angle =
+            elapsed * bf.userData.speed +
+            bf.userData.phase;
+
+        bf.position.x =
+            bf.userData.centerX +
+            Math.cos(angle) * bf.userData.radius;
+
+        bf.position.z =
+            bf.userData.centerZ +
+            Math.sin(angle) * bf.userData.radius;
+
+        bf.position.y =
+            bf.userData.baseY +
+            Math.sin(elapsed * 2 + bf.userData.phase) * 0.25;
+
+        const glow =
+            0.45 +
+            0.55 * Math.sin(elapsed * 4 + bf.userData.blink);
+
+        bf.children[0].material.opacity = glow;
+        bf.children[1].material.opacity = glow * 0.25;
+
+    });
+
+    birds.forEach(bird => {
+
+        // Circle high in the sky
+        const angle = elapsed * bird.userData.speed + bird.userData.phase;
+
+        bird.position.x = Math.cos(angle) * bird.userData.radius;
+        bird.position.z = Math.sin(angle) * bird.userData.radius;
+        bird.position.y = bird.userData.baseY + Math.sin(elapsed * 0.5 + bird.userData.phase) * 2;
+
+        bird.rotation.y = -angle;
+
+        // Wing flap
+        const flap = Math.sin(elapsed * 3 + bird.userData.wingPhase) * 0.25;
+
+        bird.children.forEach((w, i) => {
+            w.rotation.z = (i === 0 ? 1 : -1) * (0.3 + flap);
+        });
+
+    });
+
+});
+
+console.log('[M2] Terrain details ready');
+})();
+</script>
+
+
+<script>
+/* ============================================================
+   M3 — PLAYER CHARACTER (cute princess Mana)
+   Detailed mesh, smooth facing toward movement,
+   walk animation, third-person camera, name tag
+============================================================ */
+(function buildPlayer() {
+  const scene  = window.GAME.scene;
+  const camera = window.GAME.camera;
+
+  function groundY(x, z) {
+    return Math.sin(x*0.12)*0.6 + Math.cos(z*0.15)*0.5 + Math.sin((x+z)*0.08)*0.4;
+  }
+
+  // ── Materials ─────────────────────────────────────────────
+  const skinM  = new THREE.MeshLambertMaterial({ color: 0xfcd5b5 });
+  const dressM = new THREE.MeshLambertMaterial({ color: 0xf472b6 });
+  const trimM  = new THREE.MeshLambertMaterial({ color: 0xfda4af });
+  const hairM  = new THREE.MeshLambertMaterial({ color: 0x7c4a0a });
+  const bowM   = new THREE.MeshLambertMaterial({ color: 0xf9a8d4 });
+  const shoeM  = new THREE.MeshLambertMaterial({ color: 0x7c3aed });
+  const eyeM   = new THREE.MeshLambertMaterial({ color: 0x1e1b4b });
+  const shineM = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const blshM  = new THREE.MeshLambertMaterial({ color: 0xfda4af, transparent: true, opacity: 0.6 });
+  const goldM  = new THREE.MeshLambertMaterial({ color: 0xfbbf24 });
+
+  // ── Body group (animated separately for walk bob) ─────────
+  const player  = new THREE.Group();
+  const bodyGrp = new THREE.Group();
+
+  // Shoes
+  [[-0.13], [0.13]].forEach(([sx]) => {
+    const sh = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 4), shoeM);
+    sh.position.set(sx, 0.06, 0.07);
+    sh.scale.set(1, 0.5, 1.3);
+    sh.castShadow = true;
+    bodyGrp.add(sh);
+  });
+
+  // Dress (cone)
+  const dress = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.60, 1.1, 16), dressM);
+  dress.position.y = 0.85;
+  dress.castShadow = true;
+  bodyGrp.add(dress);
+
+  // Dress trim band at bottom
+  const trimDisc = new THREE.Mesh(new THREE.CylinderGeometry(0.61, 0.63, 0.04, 16), trimM);
+  trimDisc.position.y = 0.32;
+  bodyGrp.add(trimDisc);
+
+  // Small white flower dots on dress
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const r = 0.25 + Math.random() * 0.15;
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.03, 4, 3),
+      new THREE.MeshLambertMaterial({ color: 0xffffff }));
+    dot.position.set(Math.cos(a)*r, 0.9 + Math.random()*0.3, Math.sin(a)*r);
+    bodyGrp.add(dot);
+  }
+
+  // Torso
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.42, 8), dressM);
+  torso.position.y = 1.32;
+  bodyGrp.add(torso);
+
+  // Arms (pivot groups for walk animation)
+  const lArm = new THREE.Group(); lArm.position.set(-0.28, 1.5, 0); bodyGrp.add(lArm);
+  const rArm = new THREE.Group(); rArm.position.set( 0.28, 1.5, 0); bodyGrp.add(rArm);
+  const armGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.44, 6);
+  const armMat = new THREE.MeshLambertMaterial({ color: 0xfcd5b5 });
+  const lArmMesh = new THREE.Mesh(armGeo, armMat); lArmMesh.position.set(0, -0.22, 0); lArm.add(lArmMesh);
+  const rArmMesh = new THREE.Mesh(armGeo, armMat); rArmMesh.position.set(0, -0.22, 0); rArm.add(rArmMesh);
+
+  // Head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), skinM);
+  head.position.y = 1.9;
+  head.castShadow = true;
+  bodyGrp.add(head);
+
+  // Nose
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.02, 4, 3), skinM);
+  nose.position.set(0, 1.88, 0.26);
+  bodyGrp.add(nose);
+
+  // Mouth (tiny smile torus)
+  const mouth = new THREE.Mesh(
+    new THREE.TorusGeometry(0.03, 0.01, 4, 8),
+    new THREE.MeshLambertMaterial({ color: 0xe91e63 })
+  );
+  mouth.position.set(0, 1.82, 0.26);
+  mouth.rotation.x = Math.PI / 2;
+  bodyGrp.add(mouth);
+
+  // Eyes with shine
+  [[-0.1], [0.1]].forEach(([ex]) => {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 4), eyeM);
+    e.position.set(ex, 1.93, 0.25);
+    bodyGrp.add(e);
+    const shine = new THREE.Mesh(new THREE.SphereGeometry(0.025, 4, 3), shineM);
+    shine.position.set(ex + 0.015, 1.95, 0.28);
+    bodyGrp.add(shine);
+  });
+
+  // Eyebrows
+  [[-0.12], [0.12]].forEach(([ex]) => {
+    const brow = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.02, 0.08, 4), hairM);
+    brow.position.set(ex, 1.98, 0.22);
+    brow.rotation.z = ex > 0 ? 0.2 : -0.2;
+    bodyGrp.add(brow);
+  });
+
+  // Blush
+  [[-0.19], [0.19]].forEach(([bx]) => {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.08, 5, 4), blshM);
+    b.position.set(bx, 1.87, 0.22);
+    b.scale.set(1, 0.5, 0.5);
+    bodyGrp.add(b);
+  });
+
+  // Earrings
+  [[-0.29], [0.29]].forEach(([ex]) => {
+    const earring = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 4), goldM);
+    earring.position.set(ex, 1.85, 0.1);
+    bodyGrp.add(earring);
+  });
+
+  // Hair — main top volume
+  const hTop = new THREE.Mesh(new THREE.SphereGeometry(0.3, 10, 8), hairM);
+  hTop.position.set(0, 2.1, -0.02);
+  bodyGrp.add(hTop);
+
+  // Side hair strands
+  [[-0.22, 1.7, -0.05, 0.22], [0.22, 1.7, -0.05, -0.22]].forEach(([hx, hy, hz, rz]) => {
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.52, 6), hairM);
+    h.position.set(hx, hy, hz);
+    h.rotation.z = rz * 0.9;
+    bodyGrp.add(h);
+  });
+
+  // Hair curls
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const curl = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.04, 6, 8), hairM);
+    curl.position.set(Math.cos(a)*0.25, 2.05, Math.sin(a)*0.25);
+    curl.rotation.x = a * 0.5;
+    bodyGrp.add(curl);
+  }
+
+  // Bow (two lobes + center)
+  [[-0.15, 2.28], [0.15, 2.28]].forEach(([bx, by]) => {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 4), bowM);
+    b.scale.set(1.2, 0.6, 0.8);
+    b.position.set(bx, by, 0);
+    bodyGrp.add(b);
+  });
+  const bowC = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 4),
+    new THREE.MeshLambertMaterial({ color: 0xfb7185 }));
+  bowC.position.set(0, 2.28, 0.05);
+  bodyGrp.add(bowC);
+
+  // Crown base + spikes
+  const crownBase = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.1, 10), goldM);
+  crownBase.position.y = 2.22;
+  bodyGrp.add(crownBase);
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.18, 6), goldM);
+    spike.position.set(Math.cos(a)*0.16, 2.36, Math.sin(a)*0.16);
+    bodyGrp.add(spike);
+  }
+  // Crown gems
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const gem = new THREE.Mesh(new THREE.SphereGeometry(0.03, 5, 4),
+      new THREE.MeshBasicMaterial({ color: [0xff85c1, 0xa78bfa, 0x7dd3fc, 0x86efac, 0xfbbf24][i] }));
+    gem.position.set(Math.cos(a)*0.16, 2.24, Math.sin(a)*0.16);
+    bodyGrp.add(gem);
+  }
+
+  player.add(bodyGrp);
+
+  // ── Floating name tag sprite ───────────────────────────────
+  const tagCanvas = document.createElement('canvas');
+  tagCanvas.width = 256; tagCanvas.height = 80;
+  const tagCtx = tagCanvas.getContext('2d');
+  const grad = tagCtx.createLinearGradient(0, 0, 0, 80);
+  grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+  grad.addColorStop(1, 'rgba(255,220,240,0.95)');
+  tagCtx.fillStyle = grad;
+  tagCtx.beginPath();
+  tagCtx.roundRect(10, 10, 236, 60, 12);
+  tagCtx.fill();
+  tagCtx.strokeStyle = '#ff85c1'; tagCtx.lineWidth = 3; tagCtx.stroke();
+  tagCtx.fillStyle = '#9b1d6b';
+  tagCtx.font = 'bold 34px Arial';
+  tagCtx.textAlign = 'center'; tagCtx.textBaseline = 'middle';
+  tagCtx.fillText('✿ Mana ✿', 128, 42);
+  const nameTag = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(tagCanvas),
+    transparent: true, depthTest: true, depthWrite: false
+  }));
+  nameTag.scale.set(1.6, 0.55, 1);
+  nameTag.position.set(0, 3.5, 0);
+  nameTag.renderOrder = 1;
+  player.add(nameTag);
+
+  player.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+
+  player.position.set(0, groundY(0, 0), 8);
+  scene.add(player);
+
+  // ── Input ─────────────────────────────────────────────────
+  const keys = {};
+  window.addEventListener('keydown', e => { keys[e.code] = true; });
+  window.addEventListener('keyup',   e => { keys[e.code] = false; });
+  window.GAME.keys = keys; // exposed so touch controls (M6) can simulate key presses
+
+  // ── Camera config — fixed behind character ────────────────
+  const CAM_DIST   = 8;
+  const CAM_HEIGHT = 4;
+  const camPos     = new THREE.Vector3();
+  const camLook    = new THREE.Vector3();
+
+  // Walk animation state
+  let bobTime     = 0;
+  let facingAngle = 0;
+
+  // Building collision zones [x, z, radius]
+  const COLLIDERS = [
+    [ 0,   0,  4],    // fountain
+    [-28, -28,  7],   // pizza
+    [ 28, -28,  7],   // piercing
+    [  0,  32,  8],   // horse stable
+  ];
+
+  function collides(nx, nz) {
+    return COLLIDERS.some(([cx, cz, r]) =>
+      Math.sqrt((nx - cx)**2 + (nz - cz)**2) < r
+    );
+  }
+
+  // ── Update loop ───────────────────────────────────────────
+  window.GAME.updaters.push(function(elapsed, delta) {
+    const dt = Math.min(delta, 0.05);
+
+    // A/D rotate character
+    if (keys['KeyA'] || keys['ArrowLeft'])  { facingAngle += 2.2 * dt; }
+    if (keys['KeyD'] || keys['ArrowRight']) { facingAngle -= 2.2 * dt; }
+
+    player.rotation.y = facingAngle;
+
+    // W moves in the direction camera is looking (into the scene)
+    // S pulls back toward camera
+    let moveX = 0, moveZ = 0;
+    const camAngle = facingAngle;
+    if (keys['KeyW'] || keys['ArrowUp']) {
+      moveX =  Math.sin(camAngle);
+      moveZ =  Math.cos(camAngle);
+    }
+    if (keys['KeyS'] || keys['ArrowDown']) {
+      moveX = -Math.sin(camAngle);
+      moveZ = -Math.cos(camAngle);
+    }
+
+    const moving = moveX !== 0 || moveZ !== 0;
+
+    if (moving) {
+      const len = Math.sqrt(moveX*moveX + moveZ*moveZ);
+      moveX /= len; moveZ /= len;
+
+      let nx = player.position.x + moveX * 6.5 * dt;
+      let nz = player.position.z + moveZ * 6.5 * dt;
+
+      // World boundary
+      const d = Math.sqrt(nx*nx + nz*nz);
+      if (d > 50) { nx = (nx/d)*50; nz = (nz/d)*50; }
+
+      // Building collision — don't update position if inside a collider
+      if (!collides(nx, nz)) {
+        player.position.x = nx;
+        player.position.z = nz;
+      }
+
+      bobTime += dt * 9;
+    }
+
+    // Ground snap + bob
+    const bobY = moving ? Math.abs(Math.sin(bobTime)) * 0.08 : 0;
+    player.position.y = groundY(player.position.x, player.position.z) + bobY + 0.12;
+
+    // Walk / idle animation
+    if (moving) {
+      lArm.rotation.x    = -Math.sin(bobTime) * 0.5;
+      rArm.rotation.x    =  Math.sin(bobTime) * 0.5;
+      bodyGrp.position.y = Math.abs(Math.sin(bobTime * 2)) * 0.03;
+      head.position.y    = 1.9 + Math.sin(bobTime * 2) * 0.02;
+    } else {
+      lArm.rotation.x    =  Math.sin(elapsed * 1.5) * 0.05;
+      rArm.rotation.x    = -Math.sin(elapsed * 1.5) * 0.05;
+      bodyGrp.position.y =  Math.sin(elapsed * 1.5) * 0.018;
+      head.position.y    = 1.9 + Math.sin(elapsed * 1.5) * 0.01;
+    }
+
+    // Name tag float
+    nameTag.position.y = 3.4 + Math.sin(elapsed * 2) * 0.05;
+
+    // Camera always behind — opposite of movement direction
+    camPos.set(
+      player.position.x - Math.sin(facingAngle) * CAM_DIST,
+      player.position.y + CAM_HEIGHT,
+      player.position.z - Math.cos(facingAngle) * CAM_DIST
+    );
+    camera.position.lerp(camPos, 0.1);
+    camLook.set(player.position.x, player.position.y + 1.6, player.position.z);
+    camera.lookAt(camLook);
+  });
+
+  window.playerReady = true;
+  window.GAME.player = player;
+
+  // ── Flower trail — blooms behind Mana as she walks ────────
+  (function flowerTrail() {
+    const trailFlowers = [];
+    let lastX = 0, lastZ = 0, lastSpawn = 0;
+    const SPAWN_DIST = 0.6;   // spawn more frequently
+    const FADE_TIME  = 2.2;   // shorter-lived blooms
+    const MAX        = 140;   // more flowers at once
+
+    const petalColors = [
+      0xff1744, 0xff4081, 0xf50057, 0xff6d00,  // vivid reds/pinks/orange
+      0xff80ab, 0xf48fb1, 0xce93d8, 0xea80fc,  // bright pinks/purples
+      0xffd600, 0xffea00, 0xffffff, 0x69f0ae,  // yellow, white, mint
+      0x40c4ff, 0xe040fb, 0xff6e40, 0xccff90,  // blue, magenta, coral, lime
+    ];
+    const stemMat = new THREE.MeshLambertMaterial({ color: 0x2e7d32 });
+    const leafMat = new THREE.MeshLambertMaterial({ color: 0x388e3c });
+
+    function spawnTrailFlower(x, z) {
+      const g      = new THREE.Group();
+      const gy     = groundY(x, z);
+      const color  = petalColors[Math.floor(Math.random() * petalColors.length)];
+      const isTulip = Math.random() > 0.5;
+      const petalMat = new THREE.MeshLambertMaterial({ color });
+
+      // Stem
+      const stemH = 0.4 + Math.random() * 0.3;
+      const stem  = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.03, stemH, 5), stemMat);
+      stem.position.y = stemH / 2;
+      stem.castShadow = false;
+      stem.receiveShadow = false;
+      g.add(stem);
+
+      // Leaf
+      const leaf = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.05, 0.26, 4), leafMat);
+      leaf.position.set((Math.random()-0.5)*0.14, stemH*0.45, 0);
+      leaf.rotation.z = (Math.random()-0.5) * 1.2;
+      leaf.castShadow = false;
+      leaf.receiveShadow = false;
+      g.add(leaf);
+
+      if (isTulip) {
+        // Tulip — cup of 6 larger petals
+        for (let i = 0; i < 6; i++) {
+          const a = (i/6)*Math.PI*2;
+          const p = new THREE.Mesh(new THREE.SphereGeometry(0.1, 5, 5), petalMat);
+          p.scale.set(0.55, 1.2, 0.55);
+          p.position.set(Math.cos(a)*0.09, stemH+0.1, Math.sin(a)*0.09);
+          p.rotation.x = -0.2; p.rotation.y = a;
+          p.castShadow = false;
+          p.receiveShadow = false;
+          g.add(p);
+        }
+        const center = new THREE.Mesh(new THREE.SphereGeometry(0.075, 5, 5),
+          new THREE.MeshLambertMaterial({ color: new THREE.Color(color).multiplyScalar(0.65) }));
+        center.position.y = stemH + 0.06;
+        center.castShadow = false;
+        center.receiveShadow = false;
+        g.add(center);
+      } else {
+        // Rose — 3 layers, bigger petals
+        const layers = [3, 5, 8];
+        layers.forEach((count, li) => {
+          const r    = 0.05 + li * 0.07;
+          const yOff = stemH + 0.2 - li * 0.06;
+          const pScale = 0.5 + li * 0.18;
+          for (let i = 0; i < count; i++) {
+            const a = (i/count)*Math.PI*2 + li*0.4;
+            const p = new THREE.Mesh(new THREE.SphereGeometry(0.09, 5, 4),
+              new THREE.MeshLambertMaterial({
+                color: new THREE.Color(color).multiplyScalar(0.85 + li*0.08)
+              }));
+            p.scale.set(pScale, 0.5, pScale);
+            p.position.set(Math.cos(a)*r, yOff, Math.sin(a)*r);
+            p.rotation.y = a; p.rotation.x = -0.35 + li*0.1;
+            p.castShadow = false;
+            p.receiveShadow = false;
+            g.add(p);
+          }
+        });
+        const bud = new THREE.Mesh(new THREE.SphereGeometry(0.065, 5, 5),
+          new THREE.MeshLambertMaterial({ color: new THREE.Color(color).multiplyScalar(0.5) }));
+        bud.position.y = stemH + 0.25;
+        bud.castShadow = false;
+        bud.receiveShadow = false;
+        g.add(bud);
+      }
+
+      // Start tiny, scale up
+      g.scale.set(0.01, 0.01, 0.01);
+      g.position.set(
+        x + (Math.random()-0.5)*1.8,
+        gy,
+        z + (Math.random()-0.5)*1.8
+      );
+      g.rotation.y = Math.random()*Math.PI*2;
+
+      scene.add(g);
+      trailFlowers.push({
+        mesh:    g,
+        born:    performance.now() / 1000,
+        fadeAt:  performance.now() / 1000 + FADE_TIME * 0.7,
+      });
+
+      // Remove oldest if over limit
+      if (trailFlowers.length > MAX) {
+        const old = trailFlowers.shift();
+        scene.remove(old.mesh);
+      }
+    }
+
+    window.GAME.updaters.push(function(elapsed) {
+      if (!window.GAME.player) return;
+      const p  = window.GAME.player;
+      const dx = p.position.x - lastX;
+      const dz = p.position.z - lastZ;
+      const moved = Math.sqrt(dx*dx + dz*dz);
+
+      // Spawn when moved far enough
+      if (moved > SPAWN_DIST) {
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let f = 0; f < count; f++) spawnTrailFlower(lastX, lastZ);
+        lastX = p.position.x;
+        lastZ = p.position.z;
+        lastSpawn = elapsed;
+      }
+
+      // Animate: bloom up then fade out
+      const now = performance.now() / 1000;
+      for (let i = trailFlowers.length - 1; i >= 0; i--) {
+        const f    = trailFlowers[i];
+        const age  = now - f.born;
+        const life = age / FADE_TIME;
+
+        if (life < 0.18) {
+          // Bloom in — scale up quickly with a little overshoot
+          const t = life / 0.18;
+          const s = t < 0.8 ? t * 1.25 : 1 + (1-t)*0.25;
+          f.mesh.scale.setScalar(Math.min(s, 1.0));
+        } else if (life < 0.75) {
+          // Hold full size, gentle sway
+          f.mesh.scale.setScalar(1.0);
+          f.mesh.rotation.z = Math.sin(elapsed*2 + i)*0.06;
+        } else if (life < 1.0) {
+          // Fade out — shrink and lower
+          const t = (life - 0.75) / 0.25;
+          const s = 1.0 - t;
+          f.mesh.scale.setScalar(Math.max(s, 0));
+          f.mesh.position.y -= 0.012;
+          if (s <= 0.05) {
+            scene.remove(f.mesh);
+            trailFlowers.splice(i, 1);
+          }
+        }
+      }
+    });
+  })();
+
+  console.log('[M3] Mana is ready ✿');
+})();
+</script>
+
+<script>
+/* ============================================================
+   M4 — BUILDINGS + FOUNTAIN + INTERACTIONS
+   Pizza Kingdom, Piercing Studio, Horse Stable, Fountain
+   Proximity detection, E-key interaction system, all UIs
+============================================================ */
+(function buildWorld() {
+  const scene  = window.GAME.scene;
+  const prompt = document.getElementById('interact-prompt');
+
+  function groundY(x, z) {
+    return Math.sin(x*0.12)*0.6 + Math.cos(z*0.15)*0.5 + Math.sin((x+z)*0.08)*0.4;
+  }
+
+  // ── Interaction zones ─────────────────────────────────────
+  const zones = [];   // { x, z, radius, label, onInteract }
+
+  // ── UI overlay helper ─────────────────────────────────────
+  function makeOverlay(id) {
+    const el = document.createElement('div');
+    el.id = id;
+    el.style.cssText = `
+      position:fixed;inset:0;background:rgba(5,2,15,0.92);
+      display:none;flex-direction:column;align-items:center;
+      justify-content:center;z-index:50;font-family:Georgia,serif;
+      color:#f9d4e8;padding:40px;overflow-y:auto;
+    `;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function closeBtn(overlay) {
+    const btn = document.createElement('button');
+    btn.textContent = '✕  close';
+    btn.style.cssText = `
+      margin-top:32px;padding:10px 28px;
+      background:transparent;border:1px solid rgba(249,212,232,0.4);
+      color:#f9d4e8;font-family:Georgia,serif;font-size:0.9rem;
+      border-radius:30px;cursor:pointer;letter-spacing:0.08em;
+    `;
+    btn.onclick = () => {
+      overlay.style.display = 'none';
+      window.GAME.uiOpen = false;
+    };
+    overlay.appendChild(btn);
+  }
+
+  // ── Wooden signboard — placed in world space, never moves ──
+  function makeSign(worldX, worldZ, text, rotY) {
+    const g = new THREE.Group();
+    const gy = groundY(worldX, worldZ);
+
+    const postMat  = new THREE.MeshLambertMaterial({ color: 0x5c3317 });
+    const boardMat = new THREE.MeshLambertMaterial({ color: 0xc8965a });
+    const trimMat  = new THREE.MeshLambertMaterial({ color: 0x7c4a1a });
+
+    // Two posts
+    [-1.1, 1.1].forEach(px => {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 2.4, 8), postMat);
+      post.position.set(px, 0.8, 0);
+      g.add(post);
+    });
+
+    // Board — matches plane 3.0 wide x 0.9 tall
+    const board = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.9, 0.2), boardMat);
+    board.position.set(0, 2.2, 0);
+    board.castShadow = false;
+    board.receiveShadow = false;
+    g.add(board);
+
+    // Trim
+    const trimTop = new THREE.Mesh(new THREE.BoxGeometry(3.32, 0.12, 0.24), trimMat);
+    trimTop.position.set(0, 2.71, 0);
+    trimTop.castShadow = false;
+    trimTop.receiveShadow = false;
+    g.add(trimTop);
+    const trimBot = new THREE.Mesh(new THREE.BoxGeometry(3.32, 0.12, 0.24), trimMat);
+    trimBot.position.set(0, 1.69, 0);
+    trimBot.castShadow = false;
+    trimBot.receiveShadow = false;
+    g.add(trimBot);
+    const trimL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.0, 0.24), trimMat);
+    trimL.position.set(-1.68, 2.2, 0);
+    trimL.castShadow = false;
+    trimL.receiveShadow = false;
+    g.add(trimL);
+    const trimR = trimL.clone();
+    trimR.position.set(1.68, 2.2, 0);
+    trimR.castShadow = false;
+    trimR.receiveShadow = false;
+    g.add(trimR);
+
+    // Gold studs
+    [[-1.62,2.68],[1.62,2.68],[-1.62,1.72],[1.62,1.72]].forEach(([sx,sy]) => {
+      const stud = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 5),
+        new THREE.MeshLambertMaterial({ color: 0xffd700 }));
+      stud.position.set(sx, sy, 0.14);
+      stud.castShadow = false;
+      stud.receiveShadow = false;
+      g.add(stud);
+    });
+
+    // Text plane — baked into canvas, fixed geometry
+    const cv = document.createElement('canvas');
+    cv.width = 512; cv.height = 128;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#c8965a';
+    ctx.fillRect(0, 0, 512, 128);
+    // Wood grain
+    ctx.strokeStyle = 'rgba(140,90,30,0.4)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath(); ctx.moveTo(0, 20+i*30); ctx.lineTo(512, 22+i*30); ctx.stroke();
+    }
+    // Bold text — sized to fit within board
+    ctx.fillStyle = '#2a0d00';
+    ctx.font = 'bold 48px "Arial Black", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 3;
+    // Measure and scale down if too wide
+    let fontSize = 48;
+    while (ctx.measureText(text).width > 460 && fontSize > 20) {
+      fontSize -= 4;
+      ctx.font = `bold ${fontSize}px "Arial Black", Arial, sans-serif`;
+    }
+    ctx.fillText(text, 256, 64);
+
+    // Plane matches canvas aspect: 512/128 = 4:1, so width=3.0 height=0.75
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.0, 0.75),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: false, side: THREE.DoubleSide })
+    );
+    plane.position.set(0, 2.2, 0.12);
+    g.add(plane);
+
+    // Place in world
+    g.position.set(worldX, gy, worldZ);
+    g.rotation.y = rotY;
+    scene.add(g);
+    return g;
+  }
+
+  // ── FOUNTAIN ──────────────────────────────────────────────
+  (function buildFountain() {
+    const g = new THREE.Group();
+    const stoneMat  = new THREE.MeshLambertMaterial({ color: 0xb8a888 });
+    const stoneLight= new THREE.MeshLambertMaterial({ color: 0xd4c9a8 });
+    const waterMat  = new THREE.MeshLambertMaterial({ color: 0x29b6f6, transparent: true, opacity: 0.82 });
+    const waterDeep = new THREE.MeshLambertMaterial({ color: 0x0288d1, transparent: true, opacity: 0.70 });
+
+    // Outer basin rim
+    const rim = new THREE.Mesh(new THREE.CylinderGeometry(3.1, 3.2, 0.22, 24), stoneLight);
+    rim.position.y = 0.55; g.add(rim);
+
+    // Basin body
+    const basin = new THREE.Mesh(new THREE.CylinderGeometry(3.0, 2.8, 0.65, 24), stoneMat);
+    basin.position.y = 0.28; basin.castShadow = true; basin.receiveShadow = true;
+    g.add(basin);
+
+    // Basin floor (inside water)
+    const floor = new THREE.Mesh(new THREE.CylinderGeometry(2.75, 2.75, 0.08, 24), stoneMat);
+    floor.position.y = 0.04; g.add(floor);
+
+    // Water body filling the basin — deep blue
+    const waterBody = new THREE.Mesh(new THREE.CylinderGeometry(2.72, 2.72, 0.38, 24), waterDeep);
+    waterBody.position.y = 0.3; g.add(waterBody);
+
+    // Water surface — lighter, rippling
+    const waterSurf = new THREE.Mesh(new THREE.CylinderGeometry(2.72, 2.72, 0.04, 24), waterMat);
+    waterSurf.position.y = 0.52; g.add(waterSurf);
+    g.userData.waterSurf = waterSurf;
+
+    // Central column — decorative carved stone
+    const colBase = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.65, 0.3, 10), stoneLight);
+    colBase.position.y = 0.75; g.add(colBase);
+    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.38, 1.4, 10), stoneMat);
+    col.position.y = 1.25; col.castShadow = true; g.add(col);
+
+    // Top bowl (second tier)
+    const topBowl = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 0.85, 0.25, 16), stoneLight);
+    topBowl.position.y = 2.02; g.add(topBowl);
+    const topWater = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.08, 16), waterMat);
+    topWater.position.y = 2.16; g.add(topWater);
+
+    // Capstone on very top
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8), stoneLight);
+    cap.position.y = 2.38; g.add(cap);
+
+    // ── Water jet particles (arcing streams) ─────────────────
+    const JET_COUNT  = 120;
+    const jetGeo = new THREE.BufferGeometry();
+    const jetPos = new Float32Array(JET_COUNT * 3);
+    const jetData = [];
+    for (let i = 0; i < JET_COUNT; i++) {
+      const stream  = i % 6;                       // 6 streams
+      const t       = (i / (JET_COUNT / 6)) % 1;  // position along arc
+      const angle   = (stream / 6) * Math.PI * 2;
+      jetData.push({ stream, t: t + Math.random() * 0.15, angle, speed: 0.4 + Math.random() * 0.3 });
+      jetPos[i*3]   = 0;
+      jetPos[i*3+1] = 2;
+      jetPos[i*3+2] = 0;
+    }
+    jetGeo.setAttribute('position', new THREE.Float32BufferAttribute(jetPos, 3));
+    const jets = new THREE.Points(jetGeo, new THREE.PointsMaterial({
+      color: 0x81d4fa, size: 0.13, transparent: true, opacity: 0.85
+    }));
+    g.add(jets);
+
+    // ── Splash ring at basin water level ─────────────────────
+    const splashGeo = new THREE.BufferGeometry();
+    const splashPos = new Float32Array(60 * 3);
+    for (let i = 0; i < 60; i++) {
+      const a = (i / 60) * Math.PI * 2;
+      splashPos[i*3]   = Math.cos(a) * (1.5 + Math.random() * 0.8);
+      splashPos[i*3+1] = 0.55;
+      splashPos[i*3+2] = Math.sin(a) * (1.5 + Math.random() * 0.8);
+    }
+    splashGeo.setAttribute('position', new THREE.Float32BufferAttribute(splashPos, 3));
+    const splash = new THREE.Points(splashGeo, new THREE.PointsMaterial({
+      color: 0xb3e5fc, size: 0.09, transparent: true, opacity: 0.7
+    }));
+    g.add(splash);
+
+    // Water point light — blue shimmer
+    const wLight = new THREE.PointLight(0x29b6f6, 0.8, 7);
+    wLight.position.set(0, 0.8, 0);
+    g.add(wLight);
+
+    const gy = groundY(0, 0);
+    g.position.set(0, gy, 0);
+    scene.add(g);
+
+    // ── Animate jets (arc from top, fall into basin) ──────────
+    window.GAME.updaters.push(function(elapsed) {
+      const pos = jetGeo.attributes.position;
+      jetData.forEach((d, i) => {
+        d.t = (d.t + d.speed * 0.008) % 1;
+        const t = d.t;
+        // Arc: starts at top (y=2.2), arcs outward and falls to basin (y=0.55)
+        const x = Math.cos(d.angle) * t * 1.8;
+        const y = 2.2 + t * 0.6 - t * t * 2.8;   // parabolic arc
+        const z = Math.sin(d.angle) * t * 1.8;
+        pos.setXYZ(i, x, y, z);
+      });
+      pos.needsUpdate = true;
+
+      // Ripple water surface opacity
+      waterSurf.material.opacity = 0.72 + Math.sin(elapsed * 2.5) * 0.12;
+      // Water light pulse
+      wLight.intensity = 0.7 + Math.sin(elapsed * 3) * 0.3;
+
+      // Splash particles bob slightly
+      const sp = splashGeo.attributes.position;
+      for (let i = 0; i < sp.count; i++) {
+        sp.setY(i, 0.55 + Math.sin(elapsed * 4 + i * 0.5) * 0.04);
+      }
+      sp.needsUpdate = true;
+    });
+
+    // Interaction zone
+    zones.push({
+      x: 0, z: 0, radius: 7,
+      label: '✨  Press E to make a wish',
+      onInteract: openFountainUI
+    });
+
+    // Fountain sign — faces south toward spawn
+    makeSign(3.8, 3.5, '✨ Wishing Fountain', Math.PI * 1.25);
+  })();
+
+  // Fountain UI — wish form
+  const fountainUI = makeOverlay('fountain-ui');
+  fountainUI.innerHTML = `
+    <div style="max-width:480px;text-align:center">
+      <div style="font-size:2rem;margin-bottom:8px">✨</div>
+      <h2 style="font-size:1.6rem;letter-spacing:0.08em;margin-bottom:8px;color:#f9d4e8">Wishing Fountain</h2>
+      <p style="color:#c8a8b8;font-size:0.9rem;margin-bottom:28px;line-height:1.7">
+        Close your eyes, think of your wish, and let the fountain carry it away...
+      </p>
+      <textarea id="wish-text" rows="4" placeholder="Write your wish here..." style="
+        width:100%;padding:14px;border-radius:12px;border:1px solid rgba(249,212,232,0.3);
+        background:rgba(255,255,255,0.07);color:#f9d4e8;font-family:Georgia,serif;
+        font-size:0.95rem;resize:none;outline:none;
+      "></textarea>
+      <button id="wish-send" style="
+        margin-top:16px;padding:12px 36px;background:rgba(249,212,232,0.15);
+        border:1px solid rgba(249,212,232,0.4);color:#f9d4e8;
+        font-family:Georgia,serif;font-size:0.95rem;border-radius:30px;
+        cursor:pointer;letter-spacing:0.06em;width:100%;
+      ">Send my wish into the stars ✨</button>
+      <p id="wish-status" style="margin-top:12px;font-size:0.85rem;color:#c8a8b8;min-height:20px"></p>
+    </div>
+  `;
+  closeBtn(fountainUI);
+
+  document.getElementById('wish-send').onclick = function() {
+    const text   = document.getElementById('wish-text').value.trim();
+    const status = document.getElementById('wish-status');
+    const btn    = document.getElementById('wish-send');
+
+    if (!text) {
+      status.textContent = 'Write a wish first ✨';
+      status.style.color = '#f9a8d4';
+      return;
+    }
+
+    // Disable button while sending
+    btn.disabled = true;
+    btn.textContent = 'Sending your wish... 🌟';
+    btn.style.opacity = '0.7';
+    status.textContent = '';
+
+    emailjs.send('service_6rjrokd', 'template_0mf655o', {
+      name: 'Mana',
+      wish: text,
+      message: text,
+      email: 'ghareamogh18@gmail.com',
+      time: new Date().toLocaleString()
+    }, { publicKey: 'PiwSZuasskT-AQZMB' })
+      .then(() => {
+        status.textContent = '🌟 Your wish floated up into the stars...';
+        status.style.color = '#f9d4e8';
+        document.getElementById('wish-text').value = '';
+        btn.textContent = 'Wish sent ✨';
+        btn.style.background = 'rgba(134,239,172,0.2)';
+        btn.style.borderColor = 'rgba(134,239,172,0.5)';
+        // Re-enable after a moment
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = 'Send another wish ✨';
+          btn.style.background = 'rgba(249,212,232,0.15)';
+          btn.style.borderColor = 'rgba(249,212,232,0.4)';
+          btn.style.opacity = '1';
+        }, 3000);
+      })
+      .catch((err) => {
+        console.error('EmailJS error:', err);
+        status.textContent = '✦ Could not send — check your connection and try again.';
+        status.style.color = '#fca5a5';
+        btn.disabled = false;
+        btn.textContent = 'Send my wish into the stars ✨';
+        btn.style.opacity = '1';
+      });
+  };
+
+  function openFountainUI() {
+    fountainUI.style.display = 'flex';
+    window.GAME.uiOpen = true;
+  }
+
+  // ── PIZZA KINGDOM ─────────────────────────────────────────
+  (function buildPizza() {
+    const PX = -28, PZ = -28;
+    const g   = new THREE.Group();
+    const gy  = groundY(PX, PZ);
+
+   // ===============================
+// Main Building
+// ===============================
+
+const wallMat = new THREE.MeshLambertMaterial({
+    color: 0xf8ecd2
+});
+
+const roofMat = new THREE.MeshLambertMaterial({
+    color: 0xb22222
+});
+
+const doorMat = new THREE.MeshLambertMaterial({
+    color: 0x6b3e1f
+});
+
+const signMat = new THREE.MeshLambertMaterial({
+    color: 0xfff2c9
+});
+
+// Main walls
+const walls = new THREE.Mesh(
+    new THREE.BoxGeometry(8, 5, 7),
+    wallMat
+);
+
+walls.position.set(0, 2.5, 0);
+walls.castShadow = true;
+walls.receiveShadow = true;
+
+g.add(walls);
+
+// ===============================
+// Stone Foundation
+// ===============================
+
+const base = new THREE.Mesh(
+    new THREE.BoxGeometry(8.3, 0.6, 7.3),
+    new THREE.MeshLambertMaterial({
+        color: 0xa9a9a9
+    })
+);
+
+base.position.set(0, 0.3, 0);
+base.receiveShadow = true;
+
+g.add(base);
+
+// ===============================
+// Corner Wooden Beams
+// ===============================
+
+const beamMat = new THREE.MeshLambertMaterial({
+    color: 0x704214
+});
+
+[
+    [-3.9,2.5,-3.4],
+    [ 3.9,2.5,-3.4],
+    [-3.9,2.5, 3.4],
+    [ 3.9,2.5, 3.4]
+].forEach(([x,y,z])=>{
+
+    const beam=new THREE.Mesh(
+        new THREE.BoxGeometry(0.25,5,0.25),
+        beamMat
+    );
+
+    beam.position.set(x,y,z);
+    beam.castShadow=true;
+
+    g.add(beam);
+
+});
+
+// ===============================
+// Horizontal Wooden Trim
+// ===============================
+
+const trimTop = new THREE.Mesh(
+    new THREE.BoxGeometry(8.15,0.18,7.15),
+    beamMat
+);
+
+trimTop.position.set(0,4.95,0);
+
+g.add(trimTop);
+
+const trimMiddle = new THREE.Mesh(
+    new THREE.BoxGeometry(8.1,0.15,7.1),
+    beamMat
+);
+
+trimMiddle.position.set(0,2.7,0);
+
+g.add(trimMiddle);
+
+   // =====================================
+// Multi-Layer Pizza Kingdom Roof
+// =====================================
+
+// Main roof
+const roofA = new THREE.Mesh(
+    new THREE.BoxGeometry(9.4, 0.45, 8.4),
+    roofMat
+);
+roofA.position.set(0, 5.15, 0);
+roofA.castShadow = true;
+roofA.receiveShadow = true;
+g.add(roofA);
+
+// Upper pyramid roof
+const roofPeak = new THREE.Mesh(
+    new THREE.CylinderGeometry(0, 4.8, 2.5, 4),
+    roofMat
+);
+roofPeak.position.set(0, 6.2, 0);
+roofPeak.rotation.y = Math.PI / 4;
+roofPeak.castShadow = true;
+g.add(roofPeak);
+
+// Decorative roof cap
+const roofCap = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.45, 0.7, 0.45, 8),
+    new THREE.MeshLambertMaterial({
+        color: 0xf4d03f
+    })
+);
+roofCap.position.set(0, 7.55, 0);
+g.add(roofCap);
+
+// Roof border
+const roofEdgeMat = new THREE.MeshLambertMaterial({
+    color: 0x7a2d12
+});
+
+const frontEdge = new THREE.Mesh(
+    new THREE.BoxGeometry(9.6, 0.18, 0.25),
+    roofEdgeMat
+);
+frontEdge.position.set(0, 5.02, 4.15);
+g.add(frontEdge);
+
+const backEdge = frontEdge.clone();
+backEdge.position.z = -4.15;
+g.add(backEdge);
+
+const leftEdge = new THREE.Mesh(
+    new THREE.BoxGeometry(0.25, 0.18, 8.6),
+    roofEdgeMat
+);
+leftEdge.position.set(-4.7, 5.02, 0);
+g.add(leftEdge);
+
+const rightEdge = leftEdge.clone();
+rightEdge.position.x = 4.7;
+g.add(rightEdge);
+
+// Small roof supports under the overhang
+const supportMat = new THREE.MeshLambertMaterial({
+    color: 0x704214
+});
+
+[-3, -1, 1, 3].forEach(x => {
+
+    const support = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, 0.7, 0.18),
+        supportMat
+    );
+
+    support.position.set(x, 4.7, 3.65);
+    g.add(support);
+
+});
+
+[-3, -1, 1, 3].forEach(x => {
+
+    const support = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, 0.7, 0.18),
+        supportMat
+    );
+
+    support.position.set(x, 4.7, -3.65);
+    g.add(support);
+
+});
+    // =====================================
+// Royal Double Door
+// =====================================
+
+// Left Door
+const leftDoor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.75, 2.5, 0.18),
+    doorMat
+);
+leftDoor.position.set(-0.42, 1.25, 3.60);
+leftDoor.castShadow = true;
+g.add(leftDoor);
+
+// Right Door
+const rightDoor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.75, 2.5, 0.18),
+    doorMat
+);
+rightDoor.position.set(0.42, 1.25, 3.60);
+rightDoor.castShadow = true;
+g.add(rightDoor);
+
+// Golden Door Handles
+const handleMat = new THREE.MeshLambertMaterial({
+    color: 0xf4d03f
+});
+
+const leftHandle = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 12, 12),
+    handleMat
+);
+leftHandle.position.set(-0.12, 1.25, 3.71);
+g.add(leftHandle);
+
+const rightHandle = leftHandle.clone();
+rightHandle.position.x = 0.12;
+g.add(rightHandle);
+
+// Wooden Door Frame
+const frameMat = new THREE.MeshLambertMaterial({
+    color: 0x5b3216
+});
+
+// Left Frame
+const frameLeft = new THREE.Mesh(
+    new THREE.BoxGeometry(0.18, 2.8, 0.22),
+    frameMat
+);
+frameLeft.position.set(-0.9, 1.4, 3.58);
+g.add(frameLeft);
+
+// Right Frame
+const frameRight = frameLeft.clone();
+frameRight.position.x = 0.9;
+g.add(frameRight);
+
+// Top Beam
+const frameTop = new THREE.Mesh(
+    new THREE.BoxGeometry(2.0, 0.18, 0.22),
+    frameMat
+);
+frameTop.position.set(0, 2.72, 3.58);
+g.add(frameTop);
+
+// Small Decorative Arch
+const arch = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.0, 1.0, 0.12, 20, 1, false, Math.PI, Math.PI),
+    frameMat
+);
+arch.rotation.z = Math.PI / 2;
+arch.position.set(0, 3.05, 3.56);
+g.add(arch);
+
+// Welcome Mat
+const mat = new THREE.Mesh(
+    new THREE.BoxGeometry(2.2, 0.05, 1.0),
+    new THREE.MeshLambertMaterial({
+        color: 0x8b0000
+    })
+);
+mat.position.set(0, 0.03, 4.15);
+mat.receiveShadow = true;
+g.add(mat);
+
+    // Windows
+    const winMat = new THREE.MeshLambertMaterial({ color: 0xaaddff, transparent: true, opacity: 0.6 });
+    [-2.2, 2.2].forEach(x => {
+      const win = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.2, 0.1), winMat);
+      win.position.set(x, 3, 3.55);
+      g.add(win);
+    });
+
+    // Sign above door
+    const sign = new THREE.Mesh(new THREE.BoxGeometry(5, 1, 0.2), signMat);
+    sign.position.set(0, 4.8, 3.6);
+    g.add(sign);
+
+    // Chimney
+    const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.35, 1.8, 8), wallMat);
+    chimney.position.set(2, 6.5, -1);
+    g.add(chimney);
+
+    // =====================================
+// Outdoor Dining Area
+// =====================================
+
+const woodMat = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+const tableMat = new THREE.MeshLambertMaterial({ color: 0xd2a679 });
+const barrelMat = new THREE.MeshLambertMaterial({ color: 0x7b4a20 });
+const flowerMat = new THREE.MeshLambertMaterial({ color: 0xff4fa0 });
+const leafMat = new THREE.MeshLambertMaterial({ color: 0x3fa34d });
+
+// ---------- TABLE FUNCTION ----------
+function createTable(x, z){
+
+    // Table Top
+    const top = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.65,0.65,0.12,18),
+        tableMat
+    );
+    top.position.set(x,0.95,z);
+    top.castShadow=false;
+    top.receiveShadow=false;
+    g.add(top);
+
+    // Leg
+    const leg = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08,0.08,0.9,8),
+        woodMat
+    );
+    leg.position.set(x,0.45,z);
+    leg.castShadow=false;
+    leg.receiveShadow=false;
+    g.add(leg);
+
+    // Chairs
+    [
+        [0.9,0],
+        [-0.9,0],
+        [0,0.9],
+        [0,-0.9]
+    ].forEach(([dx,dz])=>{
+
+        const seat = new THREE.Mesh(
+            new THREE.BoxGeometry(0.35,0.08,0.35),
+            woodMat
+        );
+
+        seat.position.set(x+dx,0.55,z+dz);
+        seat.castShadow=false;
+        seat.receiveShadow=false;
+
+        g.add(seat);
+
+        const back = new THREE.Mesh(
+            new THREE.BoxGeometry(0.35,0.45,0.06),
+            woodMat
+        );
+        back.castShadow=false;
+        back.receiveShadow=false;
+
+        if(Math.abs(dx)>0){
+
+            back.position.set(
+                x+dx,
+                0.8,
+                z+dz-(dx>0?0.14:-0.14)
+            );
+
+        }else{
+
+            back.position.set(
+                x+dx-(dz>0?0.14:-0.14),
+                0.8,
+                z+dz
+            );
+
+            back.rotation.y=Math.PI/2;
+
+        }
+
+        g.add(back);
+
+    });
+
+}
+
+// Two tables
+createTable(5,1);
+createTable(4,-2.5);
+
+// =====================================
+// Barrels
+// =====================================
+
+for(let i=0;i<2;i++){
+
+    const barrel = new THREE.Mesh(
+
+        new THREE.CylinderGeometry(0.35,0.35,0.7,12),
+
+        barrelMat
+
+    );
+
+    barrel.position.set(-4.5+i*0.9,0.35,3.2);
+
+    barrel.castShadow=false;
+    barrel.receiveShadow=false;
+
+    g.add(barrel);
+
+}
+
+// =====================================
+// Pizza Boxes
+// =====================================
+
+for(let i=0;i<3;i++){
+
+    const box = new THREE.Mesh(
+
+        new THREE.BoxGeometry(0.45,0.08,0.45),
+
+        new THREE.MeshLambertMaterial({
+            color:0xf4d7a6
+        })
+
+    );
+
+    box.position.set(-4.2+i*0.22,0.78,3.2+i*0.1);
+
+    box.rotation.y=Math.random();
+
+    g.add(box);
+
+}
+
+// =====================================
+// Flower Pots
+// =====================================
+
+[-2.8,2.8].forEach(x=>{
+
+    const pot = new THREE.Mesh(
+
+        new THREE.CylinderGeometry(0.18,0.22,0.28,10),
+
+        new THREE.MeshLambertMaterial({
+            color:0xa0522d
+        })
+
+    );
+
+    pot.position.set(x,0.15,3.8);
+
+    g.add(pot);
+
+    const leaves = new THREE.Mesh(
+
+        new THREE.SphereGeometry(0.22,10,10),
+
+        leafMat
+
+    );
+
+    leaves.position.set(x,0.42,3.8);
+
+    g.add(leaves);
+
+    const flower = new THREE.Mesh(
+
+        new THREE.SphereGeometry(0.08,8,8),
+
+        flowerMat
+
+    );
+
+    flower.position.set(x,0.67,3.8);
+
+    g.add(flower);
+
+});
+
+// =====================================
+// Wooden Menu Board
+// =====================================
+
+const post = new THREE.Mesh(
+
+    new THREE.BoxGeometry(0.12,1.4,0.12),
+
+    woodMat
+
+);
+
+post.position.set(6.3,0.7,-2);
+
+g.add(post);
+
+const board = new THREE.Mesh(
+
+    new THREE.BoxGeometry(1.1,0.8,0.08),
+
+    new THREE.MeshLambertMaterial({
+        color:0xf5deb3
+    })
+
+);
+
+board.position.set(6.3,1.45,-2);
+
+g.add(board);
+
+// =====================================
+// Welcome Path
+// =====================================
+
+const pathMat = new THREE.MeshLambertMaterial({
+    color:0xbdb4a7
+});
+
+for(let i=0;i<5;i++){
+
+    const stone = new THREE.Mesh(
+
+        new THREE.BoxGeometry(0.8,0.05,0.55),
+
+        pathMat
+
+    );
+
+    stone.position.set(0,0.03,4.3+i*0.7);
+
+    stone.rotation.y=(i%2)*0.25;
+
+    stone.receiveShadow=true;
+
+    g.add(stone);
+
+}
+
+g.position.set(PX, gy, PZ);
+scene.add(g);
+
+    // Sign in front of door, facing toward center
+    makeSign(PX + 5, PZ + 5, '🍕 Pizza Kingdom', Math.PI * 0.25);
+
+    zones.push({
+      x: PX, z: PZ, radius: 10,
+      label: '🍕  Press E to enter Pizza Kingdom',
+      onInteract: openPizzaUI
+    });
+  })();
+
+  // Pizza UI
+  const pizzaUI = makeOverlay('pizza-ui');
+  pizzaUI.innerHTML = `
+    <div style="max-width:520px;text-align:center">
+      <div style="font-size:2rem;margin-bottom:8px">🍕</div>
+      <h2 style="font-size:1.6rem;letter-spacing:0.06em;margin-bottom:4px">Pizza Kingdom</h2>
+      <p style="color:#c8a8b8;font-size:0.85rem;margin-bottom:24px">Welcome, Princess Mana! Everyone here eats pizza cause that's someone's favourite food. What should we make today?</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+        ${[
+          ['Mana Special 👑','Cheese, Tandoori Paneer, Capsicum....your usual'],
+          ['Fiesta Inferno 🌶️','Spicy peppers, jalapeños, red onion'],
+          ['Garden Dream 🌿','Spinach, capsicum, cherry tomatoes, pesto'],
+          ['Quattro Formaggi 🧀','Four cheeses, truffle oil, crispy base'],
+        ].map(([name, desc]) => `
+          <div onclick="selectPizza(this)" style="
+            padding:16px;border-radius:12px;border:1px solid rgba(249,212,232,0.2);
+            cursor:pointer;text-align:left;transition:background 0.2s;
+          ">
+            <div style="font-size:1rem;font-weight:500;margin-bottom:4px">${name}</div>
+            <div style="font-size:0.78rem;color:#c8a8b8;line-height:1.5">${desc}</div>
+          </div>
+        `).join('')}
+      </div>
+      <p id="pizza-msg" style="color:#f9d4e8;font-size:0.95rem;min-height:24px;line-height:1.6"></p>
+    </div>
+  `;
+  closeBtn(pizzaUI);
+
+  window.selectPizza = function(el) {
+    document.querySelectorAll('#pizza-ui div[onclick]').forEach(d =>
+      d.style.background = 'transparent');
+    el.style.background = 'rgba(249,212,232,0.12)';
+    const name = el.querySelector('div').textContent;
+    document.getElementById('pizza-msg').textContent =
+      `✨ One "${name}" coming right up, Your Highness! The royal kitchen is fired up just for you 👑`;
+  };
+
+  function openPizzaUI() {
+    pizzaUI.style.display = 'flex';
+    window.GAME.uiOpen = true;
+  }
+
+  // ── PIERCING STUDIO ───────────────────────────────────────
+  (function buildPiercing() {
+    const PX = 28, PZ = -28;
+    const g  = new THREE.Group();
+    const gy = groundY(PX, PZ);
+
+    // Premium modern materials
+    const wallMat = new THREE.MeshLambertMaterial({
+        color: 0x1b1b1b
+    });
+
+    const trimMat = new THREE.MeshLambertMaterial({
+        color: 0xff2da3,
+        emissive: 0xff2da3,
+        emissiveIntensity: 0.35
+    });
+
+    const winMat = new THREE.MeshLambertMaterial({
+        color: 0x84e9ff,
+        transparent: true,
+        opacity: 0.45,
+        emissive: 0x3ecfff,
+        emissiveIntensity: 0.25
+    });
+
+    // Main Building
+    const walls = new THREE.Mesh(
+        new THREE.BoxGeometry(7, 5, 6),
+        wallMat
+    );
+    walls.position.set(0, 2.5, 0);
+    walls.castShadow = true;
+    walls.receiveShadow = true;
+    g.add(walls);
+
+    // Concrete platform
+    const base = new THREE.Mesh(
+        new THREE.BoxGeometry(7.4, 0.35, 6.4),
+        new THREE.MeshLambertMaterial({
+            color: 0x5c5c5c
+        })
+    );
+    base.position.set(0, 0.18, 0);
+    base.receiveShadow = true;
+    g.add(base);
+
+   // =====================================
+// Modern Flat Roof
+// =====================================
+
+// Main Roof
+const roof = new THREE.Mesh(
+    new THREE.BoxGeometry(8, 0.35, 7),
+    new THREE.MeshLambertMaterial({
+        color: 0x2b2b2b
+    })
+);
+roof.position.set(0, 5.18, 0);
+roof.castShadow = true;
+roof.receiveShadow = true;
+g.add(roof);
+
+// Neon Front Strip
+const neonMat = new THREE.MeshLambertMaterial({
+    color: 0xff2da3,
+    emissive: 0xff2da3,
+    emissiveIntensity: 0.9
+});
+
+const frontStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(8.1, 0.08, 0.10),
+    neonMat
+);
+frontStrip.position.set(0, 5.38, 3.55);
+g.add(frontStrip);
+
+// Back Strip
+const backStrip = frontStrip.clone();
+backStrip.position.z = -3.55;
+g.add(backStrip);
+
+// Left Strip
+const leftStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(0.10, 0.08, 7.1),
+    neonMat
+);
+leftStrip.position.set(-4.05, 5.38, 0);
+g.add(leftStrip);
+
+// Right Strip
+const rightStrip = leftStrip.clone();
+rightStrip.position.x = 4.05;
+g.add(rightStrip);
+
+// Small Rooftop AC Unit
+const acBase = new THREE.Mesh(
+    new THREE.BoxGeometry(1.2, 0.45, 0.8),
+    new THREE.MeshLambertMaterial({
+        color: 0x9b9b9b
+    })
+);
+acBase.position.set(2.2, 5.6, -1.8);
+acBase.castShadow = true;
+g.add(acBase);
+
+const acTop = new THREE.Mesh(
+    new THREE.BoxGeometry(1.0, 0.12, 0.6),
+    new THREE.MeshLambertMaterial({
+        color: 0xcfcfcf
+    })
+);
+acTop.position.set(2.2, 5.9, -1.8);
+g.add(acTop);
+    // =====================================
+// Premium Display Window
+// =====================================
+
+// Main Glass
+const bigWin = new THREE.Mesh(
+    new THREE.BoxGeometry(4, 2.6, 0.1),
+    winMat
+);
+bigWin.position.set(0, 2.8, 3.05);
+g.add(bigWin);
+
+// Window Frame
+const frameMat = new THREE.MeshLambertMaterial({
+    color: 0x2f2f2f
+});
+
+// Top Frame
+const topFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(4.3, 0.12, 0.15),
+    frameMat
+);
+topFrame.position.set(0, 4.12, 3.08);
+g.add(topFrame);
+
+// Bottom Frame
+const bottomFrame = topFrame.clone();
+bottomFrame.position.y = 1.48;
+g.add(bottomFrame);
+
+// Left Frame
+const leftFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(0.12, 2.75, 0.15),
+    frameMat
+);
+leftFrame.position.set(-2.08, 2.8, 3.08);
+g.add(leftFrame);
+
+// Right Frame
+const rightFrame = leftFrame.clone();
+rightFrame.position.x = 2.08;
+g.add(rightFrame);
+
+// Center Divider
+const centerFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 2.55, 0.15),
+    frameMat
+);
+centerFrame.position.set(0, 2.8, 3.08);
+g.add(centerFrame);
+
+// Soft Interior Glow
+const windowGlow = new THREE.PointLight(
+    0x66e6ff,
+    0.6,
+    5
+);
+windowGlow.position.set(0, 2.8, 2.2);
+g.add(windowGlow);
+
+  // =====================================
+// Modern Glass Double Door
+// =====================================
+
+// Left Door
+const leftDoor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.55, 2.4, 0.10),
+    winMat
+);
+leftDoor.position.set(-2.5, 1.2, 3.06);
+g.add(leftDoor);
+
+// Right Door
+const rightDoor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.55, 2.4, 0.10),
+    winMat
+);
+rightDoor.position.set(-1.9, 1.2, 3.06);
+g.add(rightDoor);
+
+// Top Frame
+const doorTop = new THREE.Mesh(
+    new THREE.BoxGeometry(1.35, 0.08, 0.12),
+    trimMat
+);
+doorTop.position.set(-2.2, 2.45, 3.07);
+g.add(doorTop);
+
+// Left Frame
+const doorLeft = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 2.4, 0.12),
+    trimMat
+);
+doorLeft.position.set(-2.84, 1.2, 3.07);
+g.add(doorLeft);
+
+// Right Frame
+const doorRight = doorLeft.clone();
+doorRight.position.x = -1.56;
+g.add(doorRight);
+
+// Centre Divider
+const divider = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 2.4, 0.12),
+    trimMat
+);
+divider.position.set(-2.2, 1.2, 3.07);
+g.add(divider);
+
+// Door Handles
+const handleMat = new THREE.MeshLambertMaterial({
+    color: 0xd9d9d9
+});
+
+[-2.35, -2.05].forEach(x => {
+
+    const handle = new THREE.Mesh(
+        new THREE.BoxGeometry(0.03, 0.25, 0.03),
+        handleMat
+    );
+
+    handle.position.set(x, 1.2, 3.12);
+
+    g.add(handle);
+
+});
+
+// =====================================
+// Luxury Neon Sign
+// =====================================
+
+// Main Sign Board
+const signBar = new THREE.Mesh(
+    new THREE.BoxGeometry(5.8, 0.8, 0.22),
+    new THREE.MeshLambertMaterial({
+        color: 0x202020
+    })
+);
+
+signBar.position.set(0, 5.0, 3.1);
+signBar.castShadow = true;
+g.add(signBar);
+
+// Neon Top Strip
+const neonTop = new THREE.Mesh(
+    new THREE.BoxGeometry(5.8, 0.08, 0.08),
+    new THREE.MeshLambertMaterial({
+        color: 0xff2da3,
+        emissive: 0xff2da3,
+        emissiveIntensity: 1
+    })
+);
+
+neonTop.position.set(0, 5.36, 3.22);
+g.add(neonTop);
+
+// Neon Bottom Strip
+const neonBottom = neonTop.clone();
+neonBottom.position.y = 4.64;
+g.add(neonBottom);
+
+// Diamond Logo
+const diamond = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.22),
+    new THREE.MeshLambertMaterial({
+        color: 0x66e6ff,
+        emissive: 0x66e6ff,
+        emissiveIntensity: 0.9
+    })
+);
+
+diamond.position.set(-2.35, 5.0, 3.25);
+diamond.rotation.y = Math.PI / 4;
+g.add(diamond);
+
+// Right Accent Diamond
+const diamond2 = diamond.clone();
+diamond2.position.x = 2.35;
+g.add(diamond2);
+
+    // Decorative studs on facade
+    for (let i = 0; i < 5; i++) {
+      const stud = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6),
+        new THREE.MeshLambertMaterial({ color: 0xffd700 }));
+      stud.position.set(-2 + i, 4.2, 3.08);
+      g.add(stud);
+    }
+
+    g.position.set(PX, gy, PZ);
+    scene.add(g);
+
+    makeSign(PX - 5, PZ + 5, '💜 Piercing Studio', -Math.PI * 0.25);
+
+    zones.push({
+      x: PX, z: PZ, radius: 10,
+      label: '💜  Press E to enter Piercing Studio',
+      onInteract: openPiercingUI
+    });
+  })();
+
+  // Piercing UI
+  const piercingUI = makeOverlay('piercing-ui');
+  piercingUI.innerHTML = `
+    <div style="max-width:560px;text-align:center">
+      <div style="font-size:2rem;margin-bottom:8px">💜</div>
+      <h2 style="font-size:1.6rem;letter-spacing:0.06em;margin-bottom:4px">The Piercing Studio</h2>
+      <p style="color:#c8a8b8;font-size:0.85rem;margin-bottom:24px">Browse our enchanted collection, Princess</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+        ${[
+          ['Helix ✨','Delicate gold hoop along the upper ear cartilage'],
+          ['Tragus 💎','A tiny gem nestled in the little ear nub'],
+          ['Daith 🌙','A crescent ring cradled in the inner ear fold'],
+          ['Conch 🐚','A bold stud or hoop set in the ear bowl'],
+          ['Flat ⭐','A flat-back stud on the upper cartilage plateau'],
+          ['Lobe 👑','Classic, timeless...but make it royal gold'],
+        ].map(([name, desc]) => `
+          <div style="
+            padding:14px 10px;border-radius:12px;
+            border:1px solid rgba(204,153,255,0.25);
+            text-align:left;
+          ">
+            <div style="font-size:0.95rem;font-weight:500;margin-bottom:6px;color:#e0b0ff">${name}</div>
+            <div style="font-size:0.75rem;color:#c8a8b8;line-height:1.5">${desc}</div>
+          </div>
+        `).join('')}
+      </div>
+      <p style="color:#c8a8b8;font-size:0.82rem;line-height:1.7;margin-top:8px">
+        Every piece here was curated with you in mind 💜<br>
+        When you're ready, we'll go get the real one together.
+      </p>
+    </div>
+  `;
+  closeBtn(piercingUI);
+
+  function openPiercingUI() {
+    piercingUI.style.display = 'flex';
+    window.GAME.uiOpen = true;
+  }
+
+  // ── HORSE STABLE ──────────────────────────────────────────
+  (function buildStable() {
+    const PX = 0, PZ = 32;
+    const g  = new THREE.Group();
+    const gy = groundY(PX, PZ);
+
+    // Premium Stable Materials
+const woodMat = new THREE.MeshLambertMaterial({
+    color: 0x6d4c2f
+});
+
+const roofMat = new THREE.MeshLambertMaterial({
+    color: 0x4a2c17
+});
+
+const strawMat = new THREE.MeshLambertMaterial({
+    color: 0xf2cf63
+});
+   // Main Barn
+const barn = new THREE.Mesh(
+    new THREE.BoxGeometry(10, 4.5, 8),
+    woodMat
+);
+barn.position.set(0, 2.25, 0);
+barn.castShadow = true;
+barn.receiveShadow = true;
+g.add(barn);
+
+// Stone Foundation
+const foundation = new THREE.Mesh(
+    new THREE.BoxGeometry(10.3, 0.5, 8.3),
+    new THREE.MeshLambertMaterial({ color: 0x7d7d7d })
+);
+foundation.position.set(0, 0.25, 0);
+foundation.receiveShadow = true;
+g.add(foundation);
+
+// Front Wooden Support Beams
+[-3.8, 3.8].forEach(x => {
+    const beam = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 4.5, 0.3),
+        woodMat
+    );
+    beam.position.set(x, 2.25, 4.05);
+    beam.castShadow = true;
+    g.add(beam);
+});
+
+// Rear Wooden Support Beams
+[-3.8, 3.8].forEach(x => {
+    const beam = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 4.5, 0.3),
+        woodMat
+    );
+    beam.position.set(x, 2.25, -4.05);
+    beam.castShadow = true;
+    g.add(beam);
+});
+    // =====================================
+// Premium Stable Roof
+// =====================================
+
+// Left Roof
+const roofL = new THREE.Mesh(
+    new THREE.BoxGeometry(11.5, 0.3, 5.2),
+    roofMat
+);
+roofL.position.set(0, 4.8, -1.5);
+roofL.rotation.z = 0.5;
+roofL.castShadow = true;
+roofL.receiveShadow = true;
+g.add(roofL);
+
+// Right Roof
+const roofR = new THREE.Mesh(
+    new THREE.BoxGeometry(11.5, 0.3, 5.2),
+    roofMat
+);
+roofR.position.set(0, 4.8, 1.5);
+roofR.rotation.z = -0.5;
+roofR.castShadow = true;
+roofR.receiveShadow = true;
+g.add(roofR);
+
+// Roof Ridge
+const roofRidge = new THREE.Mesh(
+    new THREE.BoxGeometry(11.4, 0.4, 0.45),
+    roofMat
+);
+roofRidge.position.set(0, 5.55, 0);
+g.add(roofRidge);
+
+// Decorative Wooden Ridge Supports
+[-4, -2, 0, 2, 4].forEach(x => {
+
+    const support = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, 0.7, 0.18),
+        woodMat
+    );
+
+    support.position.set(x, 5.15, 0);
+    support.castShadow = true;
+
+    g.add(support);
+
+});
+
+    // =====================================
+// Premium Barn Doors
+// =====================================
+
+// Left Door
+const doorL = new THREE.Mesh(
+    new THREE.BoxGeometry(2.15, 3.5, 0.15),
+    roofMat
+);
+doorL.position.set(-1.15, 1.75, 4.08);
+doorL.castShadow = true;
+g.add(doorL);
+
+// Right Door
+const doorR = new THREE.Mesh(
+    new THREE.BoxGeometry(2.15, 3.5, 0.15),
+    roofMat
+);
+doorR.position.set(1.15, 1.75, 4.08);
+doorR.castShadow = true;
+g.add(doorR);
+
+// Metal Material
+const metalMat = new THREE.MeshLambertMaterial({
+    color: 0x777777
+});
+
+// Wooden Cross Braces
+[-1.15, 1.15].forEach(x => {
+
+    const brace1 = new THREE.Mesh(
+        new THREE.BoxGeometry(0.12, 3.2, 0.05),
+        woodMat
+    );
+    brace1.position.set(x, 1.75, 4.16);
+    brace1.rotation.z = Math.PI / 6;
+    g.add(brace1);
+
+    const brace2 = new THREE.Mesh(
+        new THREE.BoxGeometry(0.12, 3.2, 0.05),
+        woodMat
+    );
+    brace2.position.set(x, 1.75, 4.16);
+    brace2.rotation.z = -Math.PI / 6;
+    g.add(brace2);
+
+});
+
+// Door Handles
+[-0.3, 0.3].forEach(x => {
+
+    const handle = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.35, 0.08),
+        metalMat
+    );
+
+    handle.position.set(x, 1.8, 4.18);
+
+    g.add(handle);
+
+});
+
+// Door Hinges
+[-2.15, -0.1, 0.1, 2.15].forEach(x => {
+
+    const hinge = new THREE.Mesh(
+        new THREE.BoxGeometry(0.10, 0.45, 0.05),
+        metalMat
+    );
+
+    hinge.position.set(x, 2.7, 4.17);
+
+    g.add(hinge);
+
+});
+
+   // =====================================
+// Hay Storage Area
+// =====================================
+
+// Round Hay Bales
+[
+    [-4.2, 5.5],
+    [4.2, 5.5],
+    [-3.2, 5.9],
+    [3.2, 5.9]
+].forEach(([x, z]) => {
+
+    const bale = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.6, 0.6, 1, 12),
+        strawMat
+    );
+
+    bale.rotation.z = Math.PI / 2;
+    bale.position.set(x, 0.6, z);
+    bale.castShadow = true;
+
+    g.add(bale);
+
+});
+
+// Small Square Hay Stack
+[-4.8, 4.8].forEach(x => {
+
+    const stack = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 0.55, 0.7),
+        strawMat
+    );
+
+    stack.position.set(x, 0.3, 4.2);
+    stack.castShadow = true;
+
+    g.add(stack);
+
+});
+
+// Feed Sacks
+[-3.6, 3.6].forEach(x => {
+
+    const sack = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.28, 0.6, 10),
+        new THREE.MeshLambertMaterial({
+            color: 0xd8c7a0
+        })
+    );
+
+    sack.position.set(x, 0.3, 4.8);
+
+    g.add(sack);
+
+});
+
+// Wooden Water Trough
+const trough = new THREE.Mesh(
+    new THREE.BoxGeometry(2.2, 0.45, 0.7),
+    woodMat
+);
+
+trough.position.set(0, 0.25, 5.4);
+trough.castShadow = true;
+
+g.add(trough);
+
+// Water
+const water = new THREE.Mesh(
+    new THREE.BoxGeometry(2.0, 0.05, 0.55),
+    new THREE.MeshLambertMaterial({
+        color: 0x6ec6ff
+    })
+);
+
+water.position.set(0, 0.48, 5.4);
+
+g.add(water);
+
+    // Two horses (improved silhouettes)
+function makeHorse(x, z, color) {
+
+  const hg = new THREE.Group();
+  const hm = new THREE.MeshLambertMaterial({ color });
+
+  // Body
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.7, 0.9, 0.75),
+    hm
+  );
+  body.position.y = 1.2;
+  body.castShadow = false;
+  body.receiveShadow = false;
+  hg.add(body);
+
+  // Neck
+  const neck = new THREE.Mesh(
+    new THREE.BoxGeometry(0.4, 0.85, 0.4),
+    hm
+  );
+  neck.position.set(0.7, 1.8, 0);
+  neck.rotation.z = -0.35;
+  neck.castShadow = false;
+  neck.receiveShadow = false;
+  hg.add(neck);
+
+  // Head
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 0.45, 0.4),
+    hm
+  );
+  head.position.set(1.05, 2.25, 0);
+  head.castShadow = false;
+  head.receiveShadow = false;
+  hg.add(head);
+
+  // Ears
+  [-0.08, 0.08].forEach(zOff => {
+
+    const ear = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.18, 0.06),
+      hm
+    );
+
+    ear.position.set(1.2, 2.6, zOff);
+    ear.castShadow = false;
+    ear.receiveShadow = false;
+    hg.add(ear);
+
+  });
+
+  // Tail
+  const tail = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 0.55, 0.08),
+    new THREE.MeshLambertMaterial({ color: 0x2b1b10 })
+  );
+
+  tail.position.set(-0.95, 1.45, 0);
+  tail.rotation.z = 0.6;
+  tail.castShadow = false;
+  tail.receiveShadow = false;
+  hg.add(tail);
+
+  // Legs
+  [[-0.5,0.3],[-0.5,-0.3],[0.5,0.3],[0.5,-0.3]].forEach(([lx,lz]) => {
+
+    const leg = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 0.9, 0.2),
+      hm
+    );
+
+    leg.position.set(lx,0.45,lz);
+    leg.castShadow = false;
+    leg.receiveShadow = false;
+    hg.add(leg);
+
+    // Hoof
+    const hoof = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22,0.08,0.22),
+      new THREE.MeshLambertMaterial({ color: 0x222222 })
+    );
+
+    hoof.position.set(lx,0.02,lz);
+    hoof.castShadow = false;
+    hoof.receiveShadow = false;
+    hg.add(hoof);
+
+  });
+
+  hg.position.set(
+    x,
+    groundY(PX + x, PZ + z) + 0.05,
+    z
+  );
+
+  return hg;
+}
+
+g.add(makeHorse(-2.5, -1.5, 0xc8a87a));
+g.add(makeHorse( 2.5, -1.5, 0x5c3317));
+
+    // Fence posts
+    for (let i = -5; i <= 5; i++) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.2, 6), woodMat);
+      post.position.set(i, 0.6, 6);
+      g.add(post);
+      if (i < 5) {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.08, 0.08), woodMat);
+        rail.position.set(i+0.5, 0.9, 6);
+        g.add(rail);
+      }
+    }
+
+    g.position.set(PX, gy, PZ);
+    scene.add(g);
+
+    makeSign(PX - 4, PZ - 6, '🐴 Horse Stable', Math.PI);
+
+    zones.push({
+      x: PX, z: PZ, radius: 12,
+      label: '🐴  Press E to visit the horses',
+      onInteract: openHorseUI
+    });
+  })();
+
+  // Horse UI — the heartfelt message
+  const horseUI = makeOverlay('horse-ui');
+  horseUI.innerHTML = `
+    <div style="max-width:500px;text-align:center">
+      <div style="font-size:2.5rem;margin-bottom:16px">🐴</div>
+      <h2 style="font-size:1.5rem;letter-spacing:0.06em;margin-bottom:24px;color:#f9d4e8">
+        A note from the stable keeper
+      </h2>
+      <div style="
+        background:rgba(255,255,255,0.06);border-radius:16px;
+        padding:28px 32px;border:1px solid rgba(249,212,232,0.2);
+        font-size:0.95rem;line-height:1.9;color:#f0d8e8;text-align:left;
+      ">
+        <p>Hii Manu,</p><br>
+        <p>You've always talked about horses with this quiet excitement in your eyes like we haven't talked about it but i have seen your likes on reels soo it's a dream you almost forgot you had.</p><br>
+        <p>So here they are. Two horses, waiting, on your birthday.</p><br>
+        <p>One day we're going to actually do this...a small stable at our private land for us to experience on holidays and  a real ride through somewhere beautiful. I promise.</p><br>
+        <p>Until then, happy birthday. This whole little world was made because you deserve magic, every day.</p><br>
+        <p style="color:#f9d4e8;font-style:italic">With love...A sweet stranger 🤍</p>
+      </div>
+    </div>
+  `;
+  closeBtn(horseUI);
+
+  function openHorseUI() {
+    horseUI.style.display = 'flex';
+    window.GAME.uiOpen = true;
+  }
+
+  // ── PROXIMITY + E KEY SYSTEM ──────────────────────────────
+  let activeZone = null;
+
+  // Expose zones globally so we can debug from console
+  window.GAME.zones = zones;
+  window.GAME.activeZone = null;
+
+  // Shared interact action — used by the E key and by the mobile interact button (M6)
+  window.GAME.interact = function() {
+    if (window.GAME.uiOpen) return;
+    if (window.GAME.activeZone) window.GAME.activeZone.onInteract();
+    else if (window.GAME.nearChest) window.GAME.openChest(window.GAME.nearChest);
+  };
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'KeyE') window.GAME.interact();
+    if (e.code === 'Escape') {
+      document.querySelectorAll('[id$="-ui"]').forEach(el => el.style.display = 'none');
+      window.GAME.uiOpen = false;
+    }
+  });
+
+  window.GAME.updaters.push(function() {
+    if (!window.GAME.player) return;
+    if (window.GAME.uiOpen) { prompt.style.opacity = '0'; return; }
+
+    const px = window.GAME.player.position.x;
+    const pz = window.GAME.player.position.z;
+
+    let found = null;
+    let nearest = Infinity;
+    zones.forEach(zone => {
+      const d = Math.sqrt((px - zone.x)**2 + (pz - zone.z)**2);
+      if (d < zone.radius && d < nearest) { nearest = d; found = zone; }
+    });
+
+    window.GAME.activeZone = found;
+
+    if (found) {
+      prompt.textContent = found.label;
+      prompt.style.opacity = '1';
+    } else if (window.GAME.nearChest) {
+      prompt.textContent = `🎁  Press E to open chest ${window.GAME.nearChest.userData.index + 1}`;
+      prompt.style.opacity = '1';
+    } else {
+      prompt.style.opacity = '0';
+    }
+  });
+
+  console.log('[M4] Buildings, fountain, and interactions ready');
+
+  // ── Track visited zones for M5 finale ────────────────────
+  window.GAME.visitedZones = new Set();
+  window.GAME.zones = zones;
+
+  // Patch each zone's onInteract to mark it visited
+  zones.forEach((zone, i) => {
+    const original = zone.onInteract;
+    zone.onInteract = function() {
+      original();
+      window.GAME.visitedZones.add(i);
+      if (window.GAME.checkFinale) window.GAME.checkFinale();
+    };
+  });
+})();
+</script>
+
+<script>
+/* ============================================================
+   M5 — GRAND FINALE
+   Triggers after all 4 locations visited:
+   confetti, particle burst, birthday card overlay
+============================================================ */
+(function buildFinale() {
+
+  // ── Confetti canvas (2D overlay) ──────────────────────────
+  const confCv = document.createElement('canvas');
+  confCv.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:60;';
+  confCv.width  = window.innerWidth;
+  confCv.height = window.innerHeight;
+  document.body.appendChild(confCv);
+  const cctx = confCv.getContext('2d');
+  window.addEventListener('resize', () => {
+    confCv.width  = window.innerWidth;
+    confCv.height = window.innerHeight;
+  });
+
+  let confPcs = [], confRunning = false;
+
+  function startConfetti() {
+    confPcs = Array.from({ length: 260 }, () => ({
+      x:   Math.random() * confCv.width,
+      y:   -20 - Math.random() * 400,
+      vx:  (Math.random() - 0.5) * 5,
+      vy:  2.5 + Math.random() * 5,
+      w:   8  + Math.random() * 10,
+      h:   5  + Math.random() * 6,
+      rot: Math.random() * Math.PI * 2,
+      rs:  (Math.random() - 0.5) * 0.22,
+      c:   ['#ff85c1','#ffcf70','#a78bfa','#7dd3fc','#86efac','#fda4af','#fbbf24'][
+              Math.floor(Math.random() * 7)]
+    }));
+    confRunning = true;
+    drawConfetti();
+  }
+
+  function drawConfetti() {
+    if (!confRunning) return;
+    cctx.clearRect(0, 0, confCv.width, confCv.height);
+    confPcs.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.rot += p.rs;
+      cctx.save();
+      cctx.translate(p.x, p.y);
+      cctx.rotate(p.rot);
+      cctx.fillStyle = p.c;
+      cctx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+      cctx.restore();
+    });
+    confPcs = confPcs.filter(p => p.y < confCv.height + 40);
+    if (confPcs.length) requestAnimationFrame(drawConfetti);
+    else { confRunning = false; cctx.clearRect(0, 0, confCv.width, confCv.height); }
+  }
+
+  // ── 3D particle burst ─────────────────────────────────────
+  function spawnParticleBurst() {
+    const scene = window.GAME.scene;
+    const colors = [0xff85c1, 0xffcf70, 0xa78bfa, 0x7dd3fc, 0x86efac, 0xfbbf24];
+    const parts = [];
+    for (let i = 0; i < 80; i++) {
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(0.1 + Math.random() * 0.12, 4, 3),
+        new THREE.MeshBasicMaterial({ color: colors[Math.floor(Math.random() * colors.length)] })
+      );
+      const player = window.GAME.player;
+      m.position.copy(player ? player.position : new THREE.Vector3(0, 1, 0));
+      m.position.y += 1.5;
+      const angle = Math.random() * Math.PI * 2;
+      const elev  = (Math.random() - 0.3) * Math.PI;
+      const speed = 0.12 + Math.random() * 0.25;
+      m.userData.v = new THREE.Vector3(
+        Math.cos(angle) * Math.cos(elev) * speed,
+        Math.sin(elev) * speed + 0.1,
+        Math.sin(angle) * Math.cos(elev) * speed
+      );
+      m.userData.life  = 1;
+      m.userData.decay = 0.012 + Math.random() * 0.015;
+      scene.add(m);
+      parts.push(m);
+    }
+
+    // Animate particles via updater
+    const updater = function() {
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const p = parts[i];
+        p.userData.life -= p.userData.decay;
+        p.position.add(p.userData.v);
+        p.userData.v.y -= 0.005;
+        p.scale.setScalar(Math.max(0, p.userData.life));
+        if (p.userData.life <= 0) {
+          scene.remove(p);
+          parts.splice(i, 1);
+        }
+      }
+      if (parts.length === 0) {
+        const idx = window.GAME.updaters.indexOf(updater);
+        if (idx > -1) window.GAME.updaters.splice(idx, 1);
+      }
+    };
+    window.GAME.updaters.push(updater);
+  }
+
+  // ── Birthday card overlay ─────────────────────────────────
+  const card = document.createElement('div');
+  card.id = 'finale-card';
+  card.style.cssText = `
+    position:fixed;inset:0;display:none;
+    align-items:center;justify-content:center;
+    z-index:55;pointer-events:none;
+    opacity:0;transition:opacity 2s ease;
+  `;
+  card.innerHTML = `
+    <div style="
+      background:linear-gradient(135deg,rgba(255,220,240,0.92),rgba(240,210,255,0.92),rgba(255,240,200,0.92));
+      backdrop-filter:blur(14px);
+      border:2.5px solid rgba(255,160,210,0.7);
+      border-radius:32px;
+      padding:44px 56px 38px;
+      text-align:center;
+      max-width:580px;
+      width:88%;
+      box-shadow:0 8px 48px rgba(255,100,180,0.35), 0 0 0 6px rgba(255,200,230,0.22);
+      pointer-events:all;
+      position:relative;
+    ">
+      <div style="font-size:2.8rem;margin-bottom:10px;animation:floatEmoji 2.5s ease-in-out infinite;">🎂</div>
+      <div style="
+        height:2px;width:70%;margin:0 auto 18px;border-radius:2px;
+        background:linear-gradient(90deg,transparent,#ff85c1,#c084fc,#ff85c1,transparent);
+      "></div>
+      <p style="
+        font-family:'Georgia',serif;
+        font-size:clamp(1.3rem,3.5vw,2rem);
+        line-height:1.75;font-weight:700;
+        background:linear-gradient(135deg,#c0005a,#7c1fa8,#c0006a);
+        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+        background-clip:text;margin-bottom:18px;
+      ">
+        Happy Birthday, Mana 🌸<br>
+        You explored every corner<br>
+        of this little world I made for you.<br><br>
+        I hope it made you smile even<br>
+        half as much as you make me smile<br>
+        every single day. 🤍
+      </p>
+      <div style="
+        height:2px;width:70%;margin:0 auto 22px;border-radius:2px;
+        background:linear-gradient(90deg,transparent,#c084fc,#ff85c1,#c084fc,transparent);
+      "></div>
+      <button onclick="document.getElementById('finale-card').style.display='none';window.GAME.uiOpen=false;" style="
+        background:linear-gradient(135deg,#f472b6,#a855f7);
+        color:#fff;border:none;border-radius:50px;
+        padding:13px 40px;font-size:1rem;
+        font-family:'Georgia',serif;font-weight:700;
+        cursor:pointer;letter-spacing:0.06em;
+        box-shadow:0 6px 22px rgba(168,85,247,0.38);
+      ">Thank you ✨</button>
+    </div>
+  `;
+  document.body.appendChild(card);
+
+  // Floating emoji animation
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes floatEmoji {
+      0%,100% { transform:translateY(0); }
+      50%      { transform:translateY(-10px); }
+    }
+  `;
+  document.head.appendChild(style);
+
+  // ── Finale trigger ────────────────────────────────────────
+  let finaleFired = false;
+
+  window.GAME.checkFinale = function() {
+    if (finaleFired) return;
+    const visited = window.GAME.visitedZones;
+    // All 4 zones: 0=fountain, 1=pizza, 2=piercing, 3=horse
+    if (visited.size < 4) return;
+
+    finaleFired = true;
+
+    // Small delay so the last UI is seen first
+    setTimeout(() => {
+      spawnParticleBurst();
+      startConfetti();
+
+      card.style.display = 'flex';
+      window.GAME.uiOpen = true;
+      requestAnimationFrame(() => { card.style.opacity = '1'; });
+
+      // Second burst after a beat
+      setTimeout(spawnParticleBurst, 1200);
+      setTimeout(spawnParticleBurst, 2400);
+    }, 800);
+  };
+
+  // ── Progress HUD dots ─────────────────────────────────────
+  const progressBar = document.createElement('div');
+  progressBar.style.cssText = `
+    position:fixed;bottom:56px;left:50%;transform:translateX(-50%);
+    display:flex;gap:10px;align-items:center;pointer-events:none;z-index:10;
+    background:rgba(10,5,20,0.55);padding:8px 18px;border-radius:30px;
+    border:1px solid rgba(249,212,232,0.2);
+  `;
+  const dotLabels = ['✨ Fountain','🍕 Pizza','💜 Piercing','🐴 Horses'];
+  const dots = dotLabels.map(label => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;align-items:center;gap:5px;';
+    const dot = document.createElement('div');
+    dot.style.cssText = `
+      width:10px;height:10px;border-radius:50%;
+      background:rgba(255,255,255,0.2);
+      border:1.5px solid rgba(249,212,232,0.4);
+      transition:background 0.4s,box-shadow 0.4s;
+    `;
+    const lbl = document.createElement('span');
+    lbl.textContent = label;
+    lbl.style.cssText = 'color:rgba(249,212,232,0.45);font-size:0.7rem;font-family:Georgia,serif;letter-spacing:0.04em;';
+    wrap.appendChild(dot);
+    wrap.appendChild(lbl);
+    progressBar.appendChild(wrap);
+    return { dot, lbl };
+  });
+  document.body.appendChild(progressBar);
+
+  // Update dots when zones are visited
+  const originalCheck = window.GAME.checkFinale;
+  window.GAME.checkFinale = function() {
+    const visited = window.GAME.visitedZones;
+    dots.forEach(({ dot, lbl }, i) => {
+      if (visited.has(i)) {
+        dot.style.background = '#f9d4e8';
+        dot.style.boxShadow  = '0 0 6px rgba(249,212,232,0.8)';
+        lbl.style.color      = 'rgba(249,212,232,0.9)';
+      }
+    });
+    originalCheck();
+  };
+
+  console.log('[M5] Finale system ready — visit all 4 locations to unlock 🎂');
+})();
+</script>
+
+<script>
+/* ============================================================
+   M5 — 21 TREASURE CHESTS
+   Scattered across the meadow, each with a birthday message.
+   Walk near → Press E to open → message popup + sparkle burst.
+   Counter HUD tracks progress. All 21 = grand finale.
+
+   ✏️  TO CUSTOMISE: edit the MESSAGES array below.
+============================================================ */
+(function buildChests() {
+  const scene  = window.GAME.scene;
+
+  // ── 21 Birthday messages — EDIT THESE ────────────────────
+  const MESSAGES = [
+    { title: "Day One 🌸",        text: "From the very first day I met you, I knew you were special. Happy birthday, Mana." },
+    { title: "Your Laugh 😄",     text: "Your laugh is genuinely one of my favourite sounds in the world, that giggle has the power to drag me out of my darkest moments. Never stop." },
+    { title: "The Horses 🐴",     text: "One day we're actually going horse riding on the beach...galloping together. I have seen a lot of likes on reels and I do remember." },
+    { title: "Vocabulary 📚",    text: "Yes...you may not always know the right words and the perfect grammar but you always say them with the right heart and it matters a lot." },
+    { title: "Your Eyes ✨",      text: "The depth of your eyes is enough for me to drown myself everyday, every moment and to stay in those will be my pleasure." },
+    { title: "Brave 💪",          text: "You're so much braver than you give yourself credit for. I see it even when you don't." },
+    { title: "Small Things 🌷",   text: "I love how you notice small beautiful things that everyone else walks past." },
+    { title: "21 🎂",             text: "21 it is. The true adulthood starts and the world is cruel but not me...soo run to me whenever you need to. And you're stepping into it as exactly the person you're meant to be." },
+    { title: "Your Taste 🎵",     text: "Your music taste has genuinely improved my life. Thank you for the playlist and the memories." },
+    { title: "Stubborn 🌻",       text: "You are wonderfully, magnificently stubborn when something matters to you. Don't ever change that. Be attitudy be grumpy just be mine" },
+    { title: "Safe 🏡",           text: "Talking to you always feels like coming home. You're the person I find my way back to at the end of my day, and the one I begin it with." },
+    { title: "Piercing Soon 💎",  text: "Every piercing you have is really beautiful and don't shy away from getting more. I'll do the aftercare..." },
+    { title: "Weird 🌙",          text: "You're the right kind of weird. We both are, and that's what I love — to actually find someone who is a carbon copy of myself." },
+    { title: "Kind 💜",           text: "You are kinder than the world deserves sometimes. It's one of the best things about you." },
+    { title: "Growing 🌱",        text: "Watching you grow this year has been one of my favourite things to witness and I would love to see you grow each year." },
+    { title: "Chaos 🎪",          text: "You bring exactly the right amount of chaos to every situation and masti, that's how I know my life won't be boring." },
+    { title: "Soft 🌸",           text: "Your softness is not a weakness. I promise you to caress that softness and protect it." },
+    { title: "Future 🌟",         text: "Imagining a future with you is always easy and also I do get butterflies when I think about it." },
+    { title: "Today 🎉",          text: "Today is yours. This whole world, this whole day made entirely for you." },
+    { title: "Always 🤍",         text: "Things have happened...we have gone through a lot together. But I'm here for you, always." },
+    { title: "Secret chest 👑",   text: "You found all 21. Of course you did. Happy birthday, Manu. You deserve the whole world and I hope I bring it to you. 🎂" },
+  ];
+
+  // ── Chest positions — spread across the meadow ────────────
+  // Kept clear of buildings and fountain center
+ const POSITIONS = [
+  [-34,-16], [-32,10], [-26,24], [-18,-6], [-10,18],
+  [ 34,-16], [ 32,10], [ 26,24], [ 18,-6], [ 10,18],
+  [-14,-34], [14,-34], [-34,0], [34,0], [-20,30],
+  [20,30], [-6,-18], [6,-18], [-26,-12], [26,-12],
+  [0,-38]
+];
+
+  // ── Ground height ─────────────────────────────────────────
+  function groundY(x, z) {
+    return Math.sin(x*0.12)*0.6 + Math.cos(z*0.15)*0.5 + Math.sin((x+z)*0.08)*0.4;
+  }
+
+  // ── Build a chest mesh ────────────────────────────────────
+  function makeChest(x, z, index) {
+    const g  = new THREE.Group();
+    const gy = groundY(x, z);
+
+    // Materials
+    const woodMat    = new THREE.MeshLambertMaterial({ color: 0x6b3a1f });
+    const woodDark   = new THREE.MeshLambertMaterial({ color: 0x4a2610 });
+    const woodLight  = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+    const goldMat    = new THREE.MeshLambertMaterial({ color: 0xffd700 });
+    const goldDark   = new THREE.MeshLambertMaterial({ color: 0xc8960a });
+    const gemColors  = [0xff4081, 0x7c4dff, 0x00e5ff, 0x76ff03, 0xff6d00];
+    const gemMat     = new THREE.MeshLambertMaterial({ color: gemColors[index % gemColors.length], emissive: new THREE.Color(gemColors[index % gemColors.length]).multiplyScalar(0.4) });
+
+    // ── Base body ─────────────────────────────────────────────
+    // Main chest body
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.85, 1.0), woodMat);
+    body.position.y = 0.48;
+    body.castShadow = false;
+    body.receiveShadow = false;
+    g.add(body);
+
+    // Wood plank lines on front
+    for (let i = 0; i < 3; i++) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.04, 0.06), woodDark);
+      plank.position.set(0, 0.22 + i * 0.28, 0.52);
+      plank.castShadow = false;
+      plank.receiveShadow = false;
+      g.add(plank);
+    }
+
+    // Wood plank lines on sides
+    for (let i = 0; i < 3; i++) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.04, 1.02), woodDark);
+      plank.position.set(0.72, 0.22 + i * 0.28, 0);
+      plank.castShadow = false;
+      plank.receiveShadow = false;
+      g.add(plank);
+      const plankR = plank.clone();
+      plankR.position.x = -0.72;
+      plankR.castShadow = false;
+      plankR.receiveShadow = false;
+      g.add(plankR);
+    }
+
+    // ── Lid ───────────────────────────────────────────────────
+    const lid = new THREE.Group();
+    const lidBase = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.12, 1.02), woodMat);
+    lidBase.position.y = 0;
+    lid.add(lidBase);
+
+    // Lid dome — rounded top
+    const lidDome = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.7, 0.38, 12, 1, false, 0, Math.PI), woodLight);
+    lidDome.rotation.z = Math.PI / 2;
+    lidDome.rotation.y = Math.PI / 2;
+    lidDome.position.y = 0.24;
+    lid.add(lidDome);
+
+    // Lid plank lines
+    for (let i = 0; i < 3; i++) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.03, 0.06), woodDark);
+      plank.position.set(0, 0.02, -0.3 + i * 0.3);
+      plank.castShadow = false;
+      plank.receiveShadow = false;
+      lid.add(plank);
+    }
+
+    lid.position.y = 0.97;
+    lid.castShadow = false;
+    lid.receiveShadow = false;
+    g.add(lid);
+    g.userData.lid = lid;
+
+    // ── Gold trim bands ───────────────────────────────────────
+    // Horizontal gold band around middle of body
+    const bandFront = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.08, 0.06), goldMat);
+    bandFront.position.set(0, 0.55, 0.52); g.add(bandFront);
+    const bandBack  = bandFront.clone(); bandBack.position.z = -0.52; g.add(bandBack);
+    const bandLeft  = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 1.02), goldMat);
+    bandLeft.position.set(-0.72, 0.55, 0); g.add(bandLeft);
+    const bandRight = bandLeft.clone(); bandRight.position.x = 0.72; g.add(bandRight);
+
+    // Vertical gold straps — 3 across the front
+    [-0.45, 0, 0.45].forEach(bx => {
+      const strap = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.88, 0.06), goldMat);
+      strap.position.set(bx, 0.48, 0.53);
+      g.add(strap);
+      // Strap continues on lid
+      const lidStrap = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.48, 0.06), goldMat);
+      lidStrap.position.set(bx, 0.26, 0.53);
+      lid.add(lidStrap);
+    });
+
+    // Gold corner reinforcements — all 8 corners
+    [[-0.68, 0.08, 0.48],[0.68, 0.08, 0.48],[-0.68, 0.08,-0.48],[0.68, 0.08,-0.48],
+     [-0.68, 0.88, 0.48],[0.68, 0.88, 0.48],[-0.68, 0.88,-0.48],[0.68, 0.88,-0.48]
+    ].forEach(([cx,cy,cz]) => {
+      const corner = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), goldMat);
+      corner.position.set(cx, cy, cz);
+      g.add(corner);
+    });
+
+    // ── Ornate latch ─────────────────────────────────────────
+    // Latch plate
+    const latchPlate = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.32, 0.08), goldMat);
+    latchPlate.position.set(0, 0.85, 0.54); g.add(latchPlate);
+    // Keyhole
+    const keyhole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.1, 8), goldDark);
+    keyhole.rotation.x = Math.PI / 2;
+    keyhole.position.set(0, 0.88, 0.6); g.add(keyhole);
+    // Keyhole slot
+    const slot = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.1), goldDark);
+    slot.position.set(0, 0.78, 0.6); g.add(slot);
+
+    // ── Gemstone on lid center ────────────────────────────────
+    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.1, 0), gemMat);
+    gem.position.set(0, 0.38, 0.5);
+    gem.rotation.y = Math.PI / 4;
+    lid.add(gem);
+
+    // Gem setting ring
+    const gemRing = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.03, 6, 10), goldMat);
+    gemRing.rotation.x = Math.PI / 2;
+    gemRing.position.set(0, 0.36, 0.5);
+    lid.add(gemRing);
+
+    // ── Decorative rivets ─────────────────────────────────────
+    [[-0.58,0.25,0.52],[0.58,0.25,0.52],[-0.58,0.55,0.52],[0.58,0.55,0.52],
+     [-0.58,0.75,0.52],[0.58,0.75,0.52]].forEach(([rx,ry,rz]) => {
+      const rivet = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 5), goldMat);
+      rivet.position.set(rx, ry, rz);
+      g.add(rivet);
+    });
+
+    // ── Feet ─────────────────────────────────────────────────
+    [[-0.55,0.06,0.38],[0.55,0.06,0.38],[-0.55,0.06,-0.38],[0.55,0.06,-0.38]].forEach(([fx,fy,fz]) => {
+      const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.12, 6), goldDark);
+      foot.position.set(fx, fy, fz);
+      g.add(foot);
+    });
+
+    // ── Glowing aura ─────────────────────────────────────────
+    // Inner glow orb — tight and bright
+    const innerGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffe566, transparent: true, opacity: 0.9 })
+    );
+    innerGlow.position.y = 1.95;
+    g.add(innerGlow);
+    g.userData.innerGlow = innerGlow;
+
+    // Mid glow
+    const midGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.42, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffd700, transparent: true, opacity: 0.45, depthWrite: false })
+    );
+    midGlow.position.y = 1.95;
+    g.add(midGlow);
+    g.userData.midGlow = midGlow;
+
+    // Outer soft halo
+    const outerGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.75, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffec80, transparent: true, opacity: 0.18, depthWrite: false })
+    );
+    outerGlow.position.y = 1.95;
+    g.add(outerGlow);
+    g.userData.outerGlow = outerGlow;
+
+    // Sparkle ring — small gold dots orbiting
+    const sparkleGroup = new THREE.Group();
+    sparkleGroup.position.y = 1.95;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const sp = new THREE.Mesh(
+        new THREE.SphereGeometry(0.06, 5, 4),
+        new THREE.MeshBasicMaterial({ color: 0xfffaaa })
+      );
+      sp.position.set(Math.cos(a) * 0.55, Math.sin(a) * 0.2, Math.sin(a) * 0.55);
+      sparkleGroup.add(sp);
+    }
+    g.add(sparkleGroup);
+    g.userData.sparkleGroup = sparkleGroup;
+
+    g.position.set(x, gy + 0.12, z);
+    g.rotation.y    = Math.random() * Math.PI * 2;
+    g.userData.index   = index;
+    g.userData.opened  = false;
+    g.userData.phase   = Math.random() * Math.PI * 2;
+    scene.add(g);
+    return g;
+  }
+
+  const chests = POSITIONS.map(([x, z], i) => makeChest(x, z, i));
+
+  // ── Sparkle particle burst on open ───────────────────────
+  function spawnSparkles(pos) {
+    const colors = [0xffe066, 0xff85c1, 0xa78bfa, 0x7dd3fc, 0xfbbf24, 0x86efac];
+    const parts  = [];
+    for (let i = 0; i < 35; i++) {
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07 + Math.random() * 0.08, 4, 3),
+        new THREE.MeshBasicMaterial({ color: colors[Math.floor(Math.random() * colors.length)] })
+      );
+      m.position.copy(pos);
+      m.position.y += 0.6;
+      const angle = Math.random() * Math.PI * 2;
+      const elev  = Math.random() * Math.PI;
+      const spd   = 0.08 + Math.random() * 0.18;
+      m.userData.v    = new THREE.Vector3(
+        Math.cos(angle) * Math.cos(elev) * spd,
+        Math.abs(Math.sin(elev)) * spd + 0.06,
+        Math.sin(angle) * Math.cos(elev) * spd
+      );
+      m.userData.life  = 1;
+      m.userData.decay = 0.018 + Math.random() * 0.018;
+      scene.add(m);
+      parts.push(m);
+    }
+    const updater = function() {
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const p = parts[i];
+        p.userData.life -= p.userData.decay;
+        p.position.add(p.userData.v);
+        p.userData.v.y -= 0.004;
+        p.scale.setScalar(Math.max(0, p.userData.life));
+        if (p.userData.life <= 0) { scene.remove(p); parts.splice(i, 1); }
+      }
+      if (!parts.length) {
+        const idx = window.GAME.updaters.indexOf(updater);
+        if (idx > -1) window.GAME.updaters.splice(idx, 1);
+      }
+    };
+    window.GAME.updaters.push(updater);
+  }
+
+  // ── Message popup UI ──────────────────────────────────────
+  const msgOverlay = document.createElement('div');
+  msgOverlay.style.cssText = `
+    position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+    z-index:50;background:rgba(5,2,18,0.82);font-family:Georgia,serif;
+  `;
+  document.body.appendChild(msgOverlay);
+
+  function showMessage(index) {
+    const msg = MESSAGES[index];
+    msgOverlay.innerHTML = `
+      <div style="
+        max-width:460px;width:88%;
+        background:linear-gradient(135deg,rgba(255,220,240,0.96),rgba(240,210,255,0.96));
+        border:2px solid rgba(255,160,210,0.6);
+        border-radius:28px;padding:40px 44px 32px;text-align:center;
+        box-shadow:0 8px 48px rgba(255,100,180,0.3);
+        animation:chestPop 0.45s cubic-bezier(.34,1.56,.64,1);
+      ">
+        <div style="font-size:1.8rem;margin-bottom:6px">💌</div>
+        <div style="
+          font-size:0.72rem;letter-spacing:0.14em;color:#a855f7;
+          text-transform:uppercase;margin-bottom:8px;
+        ">Chest ${index + 1} of 21</div>
+        <h3 style="
+          font-size:1.35rem;color:#9b1d6b;margin-bottom:18px;letter-spacing:0.04em;
+        ">${msg.title}</h3>
+        <div style="
+          height:1px;width:60%;margin:0 auto 18px;
+          background:linear-gradient(90deg,transparent,#ff85c1,transparent);
+        "></div>
+        <p style="
+          font-size:0.97rem;line-height:1.85;color:#4a1a3a;
+        ">${msg.text}</p>
+        <div style="
+          height:1px;width:60%;margin:20px auto 22px;
+          background:linear-gradient(90deg,transparent,#c084fc,transparent);
+        "></div>
+        <div style="font-size:0.8rem;color:#a855f7;margin-bottom:20px;">
+          ${openedCount} / 21 chests found 🗝️
+        </div>
+        <button id="chest-close-btn" style="
+          background:linear-gradient(135deg,#f472b6,#a855f7);
+          color:#fff;border:none;border-radius:50px;
+          padding:11px 36px;font-size:0.9rem;
+          font-family:Georgia,serif;cursor:pointer;
+          letter-spacing:0.05em;
+          box-shadow:0 4px 18px rgba(168,85,247,0.38);
+        ">Keep exploring 🌸</button>
+      </div>
+    `;
+    msgOverlay.style.display = 'flex';
+    window.GAME.uiOpen = true;
+    document.getElementById('chest-close-btn').onclick = () => {
+      msgOverlay.style.display = 'none';
+      window.GAME.uiOpen = false;
+      if (openedCount === 21) triggerGrandFinale();
+    };
+  }
+
+  // Animation keyframe
+  const styleEl = document.createElement('style');
+  styleEl.textContent = `
+    @keyframes chestPop {
+      from { transform:scale(0.7); opacity:0; }
+      to   { transform:scale(1);   opacity:1; }
+    }
+    @keyframes floatEmoji {
+      0%,100% { transform:translateY(0); }
+      50%      { transform:translateY(-10px); }
+    }
+  `;
+  document.head.appendChild(styleEl);
+
+  // ── Open animation ────────────────────────────────────────
+  function openChest(chest) {
+    if (chest.userData.opened) return;
+    chest.userData.opened = true;
+    openedCount++;
+    updateHUD();
+    saveOpenedIndices();
+
+    // Animate lid flipping open
+    const lid   = chest.userData.lid;
+    let   prog  = 0;
+
+    const anim = function(elapsed, delta) {
+      prog += Math.min(delta, 0.05) * 3;
+      const t = Math.min(prog, 1);
+      lid.rotation.x = -t * (Math.PI * 0.78);
+      lid.position.y = 0.97 + Math.sin(t * Math.PI) * 0.2;
+      if (prog >= 1) {
+        if (chest.userData.innerGlow)  chest.userData.innerGlow.visible  = false;
+        if (chest.userData.midGlow)    chest.userData.midGlow.visible    = false;
+        if (chest.userData.outerGlow)  chest.userData.outerGlow.visible  = false;
+        if (chest.userData.sparkleGroup) chest.userData.sparkleGroup.visible = false;
+        if (chest.userData.light)      chest.userData.light.intensity    = 0;
+        if (chest.userData.fillLight)  chest.userData.fillLight.intensity = 0;
+        const idx = window.GAME.updaters.indexOf(anim);
+        if (idx > -1) window.GAME.updaters.splice(idx, 1);
+      }
+    };
+    window.GAME.updaters.push(anim);
+
+    spawnSparkles(chest.position);
+    if (window.GAME.playChestChime) window.GAME.playChestChime();
+    setTimeout(() => showMessage(chest.userData.index), 500);
+  }
+
+  // ── Chest counter HUD ─────────────────────────────────────
+  let openedCount = 0;
+
+  const hudEl = document.createElement('div');
+  hudEl.style.cssText = `
+    position:fixed;top:20px;right:24px;
+    background:rgba(10,5,20,0.65);
+    border:1px solid rgba(249,212,232,0.25);
+    border-radius:20px;padding:7px 16px;
+    color:#f9d4e8;font-family:Georgia,serif;
+    font-size:0.8rem;letter-spacing:0.06em;
+    pointer-events:none;z-index:10;
+  `;
+  hudEl.textContent = '🗝️ 0 / 21 chests';
+  document.body.appendChild(hudEl);
+
+  function updateHUD() {
+    hudEl.textContent = `🗝️ ${openedCount} / 21 chests`;
+    if (openedCount === 21) hudEl.style.color = '#ffd700';
+  }
+
+  // ── Progress persistence — survive a page refresh/close ───
+  // Works because this is a real hosted/downloaded page, not a sandboxed
+  // preview — localStorage is scoped per-origin like any normal site.
+  const SAVE_KEY = 'manaBirthdayGame_openedChests_v1';
+
+  function saveOpenedIndices() {
+    try {
+      const opened = chests.filter(c => c.userData.opened).map(c => c.userData.index);
+      localStorage.setItem(SAVE_KEY, JSON.stringify(opened));
+    } catch (e) { /* private browsing / storage disabled — fail silently */ }
+  }
+
+  function loadOpenedIndices() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) { return []; }
+  }
+
+  // Instantly apply the "already open" end-state — no animation, sparkles,
+  // or message popup, since she's already seen all of that.
+  function restoreOpenedChest(chest) {
+    chest.userData.opened = true;
+    const lid = chest.userData.lid;
+    if (lid) {
+      lid.rotation.x = -(Math.PI * 0.78);
+      lid.position.y = 0.97;
+    }
+    if (chest.userData.innerGlow)    chest.userData.innerGlow.visible    = false;
+    if (chest.userData.midGlow)      chest.userData.midGlow.visible      = false;
+    if (chest.userData.outerGlow)    chest.userData.outerGlow.visible    = false;
+    if (chest.userData.sparkleGroup) chest.userData.sparkleGroup.visible = false;
+    openedCount++;
+  }
+
+  loadOpenedIndices().forEach(idx => {
+    const chest = chests.find(c => c.userData.index === idx);
+    if (chest && !chest.userData.opened) restoreOpenedChest(chest);
+  });
+  updateHUD();
+
+  // ── Grand finale when all 21 opened ──────────────────────
+  function triggerGrandFinale() {
+    // Confetti
+    const confCv = document.createElement('canvas');
+    confCv.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:60;';
+    confCv.width = window.innerWidth; confCv.height = window.innerHeight;
+    document.body.appendChild(confCv);
+    const cctx = confCv.getContext('2d');
+    let pieces = Array.from({ length: 280 }, () => ({
+      x: Math.random() * confCv.width, y: -20 - Math.random() * 400,
+      vx: (Math.random() - 0.5) * 5, vy: 2.5 + Math.random() * 5,
+      w: 8 + Math.random() * 10, h: 5 + Math.random() * 6,
+      rot: Math.random() * Math.PI * 2, rs: (Math.random() - 0.5) * 0.22,
+      c: ['#ff85c1','#ffcf70','#a78bfa','#7dd3fc','#fda4af','#fbbf24'][Math.floor(Math.random()*6)]
+    }));
+    (function drawConf() {
+      cctx.clearRect(0, 0, confCv.width, confCv.height);
+      pieces.forEach(p => {
+        p.x += p.vx; p.y += p.vy; p.rot += p.rs;
+        cctx.save(); cctx.translate(p.x, p.y); cctx.rotate(p.rot);
+        cctx.fillStyle = p.c; cctx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+        cctx.restore();
+      });
+      pieces = pieces.filter(p => p.y < confCv.height + 40);
+      if (pieces.length) requestAnimationFrame(drawConf);
+      else { cctx.clearRect(0, 0, confCv.width, confCv.height); confCv.remove(); }
+    })();
+
+    // Final card
+    const card = document.createElement('div');
+    card.style.cssText = `
+      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      z-index:55;background:rgba(5,2,18,0.85);
+      opacity:0;transition:opacity 1.8s ease;
+    `;
+    card.innerHTML = `
+      <div style="
+        max-width:560px;width:88%;
+        background:linear-gradient(135deg,rgba(255,220,240,0.95),rgba(240,210,255,0.95),rgba(255,240,200,0.95));
+        border:2.5px solid rgba(255,160,210,0.7);border-radius:32px;
+        padding:48px 56px 40px;text-align:center;
+        box-shadow:0 8px 48px rgba(255,100,180,0.35);
+      ">
+        <div style="font-size:3rem;margin-bottom:10px;animation:floatEmoji 2.5s ease-in-out infinite;">🎂</div>
+        <div style="height:2px;width:65%;margin:0 auto 20px;border-radius:2px;
+          background:linear-gradient(90deg,transparent,#ff85c1,#c084fc,#ff85c1,transparent);"></div>
+        <p style="
+          font-family:Georgia,serif;font-size:clamp(1.1rem,3vw,1.5rem);
+          line-height:1.85;font-weight:700;margin-bottom:20px;
+          background:linear-gradient(135deg,#c0005a,#7c1fa8,#c0006a);
+          -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+        ">
+          You found all 21 chests. 👑<br><br>
+          Happy birthday, Mana.<br>
+          This whole little world was made<br>
+          because you deserve magic<br>
+          on every ordinary day. 🌸
+        </p>
+        <div style="height:2px;width:65%;margin:0 auto 24px;border-radius:2px;
+          background:linear-gradient(90deg,transparent,#c084fc,#ff85c1,#c084fc,transparent);"></div>
+        <button onclick="this.closest('div[style]').parentElement.remove()" style="
+          background:linear-gradient(135deg,#f472b6,#a855f7);color:#fff;
+          border:none;border-radius:50px;padding:13px 40px;
+          font-size:1rem;font-family:Georgia,serif;cursor:pointer;
+          letter-spacing:0.06em;box-shadow:0 6px 22px rgba(168,85,247,0.38);
+        ">Thank you ✨</button>
+      </div>
+    `;
+    document.body.appendChild(card);
+    requestAnimationFrame(() => { card.style.opacity = '1'; });
+
+    // Triple sparkle bursts
+    const player = window.GAME.player;
+    if (player) {
+      spawnSparkles(player.position);
+      setTimeout(() => spawnSparkles(player.position), 800);
+      setTimeout(() => spawnSparkles(player.position), 1600);
+    }
+  }
+
+  // ── Glow pulse animation + proximity detection ────────────
+  window.GAME.updaters.push(function(elapsed) {
+    chests.forEach(chest => {
+      if (chest.userData.opened) return;
+      const phase = chest.userData.phase;
+      const pulse = Math.sin(elapsed * 2.2 + phase);
+      const slow  = Math.sin(elapsed * 1.1 + phase);
+
+      // Three-layer glow pulse
+      if (chest.userData.innerGlow) {
+        chest.userData.innerGlow.material.opacity = 0.75 + pulse * 0.2;
+        chest.userData.innerGlow.scale.setScalar(0.9 + pulse * 0.12);
+      }
+      if (chest.userData.midGlow) {
+        chest.userData.midGlow.material.opacity = 0.3 + pulse * 0.18;
+        chest.userData.midGlow.scale.setScalar(0.95 + slow * 0.1);
+        chest.userData.midGlow.position.y = 1.95 + Math.sin(elapsed * 1.8 + phase) * 0.08;
+      }
+      if (chest.userData.outerGlow) {
+        chest.userData.outerGlow.material.opacity = 0.1 + Math.abs(slow) * 0.12;
+        chest.userData.outerGlow.scale.setScalar(1.0 + slow * 0.15);
+      }
+
+      // Sparkle ring orbits slowly
+      if (chest.userData.sparkleGroup) {
+        chest.userData.sparkleGroup.rotation.y = elapsed * 1.2 + phase;
+        chest.userData.sparkleGroup.position.y = 1.95 + Math.sin(elapsed * 1.5 + phase) * 0.12;
+      }
+    });
+  });
+
+  // ── E-key interaction — uses shared prompt from M4 ────────
+  const CHEST_RADIUS = 2.8;
+  const CHEST_LIGHT_RADIUS = 7;
+  window.GAME.nearChest = null;
+  window.GAME.openChest = openChest;  // expose so M4 E-key can call it
+
+  // One shared warm light that follows whichever unopened chest is nearest
+  // the player, instead of 42 permanently-active lights (much cheaper —
+  // every extra simultaneous light adds a lighting calculation to every
+  // shaded pixel in the whole scene, every frame).
+  const sharedChestLight = new THREE.PointLight(0xffd700, 0, 9);
+  sharedChestLight.position.y = 1.6;
+  scene.add(sharedChestLight);
+  const sharedChestFill = new THREE.PointLight(0xffaa00, 0, 5);
+  scene.add(sharedChestFill);
+
+  window.GAME.updaters.push(function(elapsed) {
+    if (!window.GAME.player || window.GAME.uiOpen) return;
+    const px = window.GAME.player.position.x;
+    const pz = window.GAME.player.position.z;
+
+    window.GAME.nearChest = null;
+    let nearest = Infinity;
+    let closestChest = null;
+    let closestDist = Infinity;
+
+    chests.forEach(chest => {
+      if (chest.userData.opened) return;
+      const d = Math.sqrt((px - chest.position.x)**2 + (pz - chest.position.z)**2);
+      if (d < CHEST_RADIUS && d < nearest) {
+        nearest = d;
+        window.GAME.nearChest = chest;
+      }
+      if (d < closestDist) { closestDist = d; closestChest = chest; }
+    });
+
+    if (closestChest && closestDist < CHEST_LIGHT_RADIUS) {
+      const fade  = 1 - (closestDist / CHEST_LIGHT_RADIUS);
+      const phase = closestChest.userData.phase;
+      const pulse = Math.sin(elapsed * 2.2 + phase);
+      const slow  = Math.sin(elapsed * 1.1 + phase);
+      sharedChestLight.position.set(closestChest.position.x, closestChest.position.y + 1.6, closestChest.position.z);
+      sharedChestFill.position.set(closestChest.position.x, closestChest.position.y + 0.3, closestChest.position.z);
+      sharedChestLight.intensity = Math.max(0, (1.4 + pulse * 0.7) * fade);
+      sharedChestFill.intensity  = Math.max(0, (0.4 + Math.abs(slow) * 0.3) * fade);
+    } else {
+      sharedChestLight.intensity = 0;
+      sharedChestFill.intensity = 0;
+    }
+  });
+
+  console.log('[M5] 21 treasure chests placed — go find them all 🗝️');
+})();
+</script>
+
+<script>
+/* ============================================================
+   M6 — MOBILE TOUCH CONTROLS
+   Virtual joystick (move) + interact button, shown only on
+   touch devices. Drives the same `keys` object the keyboard
+   uses, so it plugs into the existing movement code untouched.
+============================================================ */
+(function buildTouchControls() {
+  const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0 ||
+                   window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  if (!isTouch) return;
+
+  // Update the controls hint for touch users
+  const hint = document.getElementById('controls-hint');
+  if (hint) hint.innerHTML = 'Joystick — move<br>✋ — interact';
+
+  // ── Virtual joystick ───────────────────────────────────────
+  const JOY_SIZE  = 110;
+  const JOY_KNOB  = 46;
+  const DEADZONE  = 0.28; // fraction of radius before a direction registers
+
+  const joyBase = document.createElement('div');
+  joyBase.style.cssText = `
+    position:fixed; left:26px; bottom:26px;
+    width:${JOY_SIZE}px; height:${JOY_SIZE}px; border-radius:50%;
+    background:rgba(10,5,20,0.35); border:1px solid rgba(249,212,232,0.35);
+    z-index:40; touch-action:none;
+  `;
+  const joyKnob = document.createElement('div');
+  joyKnob.style.cssText = `
+    position:absolute; left:${(JOY_SIZE-JOY_KNOB)/2}px; top:${(JOY_SIZE-JOY_KNOB)/2}px;
+    width:${JOY_KNOB}px; height:${JOY_KNOB}px; border-radius:50%;
+    background:rgba(249,212,232,0.55); border:1px solid rgba(249,212,232,0.7);
+    transition:transform 0.05s linear;
+  `;
+  joyBase.appendChild(joyKnob);
+  document.body.appendChild(joyBase);
+
+  // ── Interact button ─────────────────────────────────────────
+  const interactBtn = document.createElement('div');
+  interactBtn.textContent = '✋';
+  interactBtn.style.cssText = `
+    position:fixed; right:28px; bottom:34px;
+    width:72px; height:72px; border-radius:50%;
+    background:rgba(10,5,20,0.45); border:1px solid rgba(249,212,232,0.4);
+    color:#f9d4e8; font-size:1.6rem;
+    display:flex; align-items:center; justify-content:center;
+    z-index:40; touch-action:none; user-select:none;
+  `;
+  document.body.appendChild(interactBtn);
+
+  interactBtn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    interactBtn.style.transform = 'scale(0.9)';
+    window.GAME.interact();
+  }, { passive: false });
+  interactBtn.addEventListener('touchend', e => {
+    e.preventDefault();
+    interactBtn.style.transform = 'scale(1)';
+  }, { passive: false });
+
+  // ── Joystick drag logic ──────────────────────────────────────
+  const keys = window.GAME.keys || (window.GAME.keys = {});
+  let touchId = null;
+  let baseRect = null;
+
+  function resetKeys() {
+    keys['KeyW'] = keys['KeyA'] = keys['KeyS'] = keys['KeyD'] = false;
+  }
+
+  function handleMove(clientX, clientY) {
+    const cx = baseRect.left + baseRect.width / 2;
+    const cy = baseRect.top + baseRect.height / 2;
+    let dx = clientX - cx;
+    let dy = clientY - cy;
+    const radius = baseRect.width / 2;
+    const dist = Math.min(Math.sqrt(dx*dx + dy*dy), radius);
+    const angle = Math.atan2(dy, dx);
+    const knobDist = dist;
+    joyKnob.style.transform = `translate(${Math.cos(angle)*knobDist}px, ${Math.sin(angle)*knobDist}px)`;
+
+    const frac = dist / radius;
+    resetKeys();
+    if (frac > DEADZONE) {
+      const nx = Math.cos(angle), ny = Math.sin(angle);
+      if (ny < -0.35) keys['KeyW'] = true;
+      if (ny >  0.35) keys['KeyS'] = true;
+      if (nx < -0.35) keys['KeyA'] = true;
+      if (nx >  0.35) keys['KeyD'] = true;
+    }
+  }
+
+  joyBase.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    touchId = t.identifier;
+    baseRect = joyBase.getBoundingClientRect();
+    handleMove(t.clientX, t.clientY);
+  }, { passive: false });
+
+  joyBase.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchId) handleMove(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+
+  function endTouch(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchId) {
+        touchId = null;
+        joyKnob.style.transform = 'translate(0,0)';
+        resetKeys();
+      }
+    }
+  }
+  joyBase.addEventListener('touchend', endTouch, { passive: false });
+  joyBase.addEventListener('touchcancel', endTouch, { passive: false });
+
+  // Hide controls while a UI overlay (chest message, building menu) is open
+  window.GAME.updaters.push(function() {
+    const hide = !!window.GAME.uiOpen;
+    joyBase.style.display = hide ? 'none' : 'block';
+    interactBtn.style.display = hide ? 'none' : 'flex';
+  });
+
+  console.log('[M6] Touch controls ready 📱');
+})();
+</script>
+
+<script>
+/* ============================================================
+   M7 — AMBIENT AUDIO
+   Plays a background music file if one is present next to this
+   HTML file, plus a gentle synthesized chime when a chest opens.
+   Falls back to a soft synthesized ambient pad if the music file
+   isn't found, so the game is never silent.
+
+   TO ADD YOUR OWN MUSIC:
+   Place your audio file in the same folder as this index.html
+   file and name it exactly:  background-music.mp3
+   (Any web-playable format works — mp3, m4a, ogg — just update
+   BG_MUSIC_FILE below to match the filename/extension you use.)
+============================================================ */
+(function buildAudio() {
+  const BG_MUSIC_FILE = './background-music.mp3';
+  const MUTE_KEY = 'manaBirthdayGame_muted_v1';
+  let muted = false;
+  try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
+
+  let ctx = null, masterGain = null, started = false;
+  let bgAudio = null, usingRealFile = false;
+
+  function startSynthPad() {
+    padGainNode(); // build the fallback ambient pad
+  }
+
+  function padGainNode() {
+    const padGain = ctx.createGain();
+    padGain.gain.value = 0.16;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    padGain.connect(filter);
+    filter.connect(masterGain);
+
+    // A dreamy, slightly open chord (root, fifth, ninth) — low and unobtrusive
+    [130.81, 196.00, 293.66].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const g = ctx.createGain();
+      g.gain.value = i === 0 ? 0.5 : 0.3;
+      osc.connect(g);
+      g.connect(padGain);
+      osc.start();
+    });
+
+    // Slow LFO sways the filter cutoff for a gentle "breathing" feel
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.06;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 260;
+    lfo.connect(lfoGain);
+    lfoGain.connect(filter.frequency);
+    lfo.start();
+  }
+
+  function ensureAudio() {
+    if (started) return;
+    started = true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return; // unsupported browser — silently skip
+
+    ctx = new AC();
+    masterGain = ctx.createGain();
+    masterGain.gain.value = muted ? 0 : 0.5;
+    masterGain.connect(ctx.destination);
+
+    // Try to play a real music file first
+    bgAudio = new Audio(BG_MUSIC_FILE);
+    bgAudio.loop = true;
+    bgAudio.volume = muted ? 0 : 0.6;
+    bgAudio.addEventListener('canplaythrough', () => { usingRealFile = true; }, { once: true });
+    bgAudio.addEventListener('error', () => {
+      // File missing/unsupported — fall back to the synthesized pad instead
+      if (!usingRealFile) startSynthPad();
+    }, { once: true });
+    bgAudio.play().catch(() => { /* will retry via canplaythrough/error */ });
+  }
+
+  // Gentle ascending chime — plays when a chest opens
+  window.GAME.playChestChime = function() {
+    if (!started || !ctx) return;
+    const notes = [523.25, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const g = ctx.createGain();
+      const t0 = ctx.currentTime + i * 0.09;
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(0.22, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.9);
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start(t0);
+      osc.stop(t0 + 1);
+    });
+  };
+
+  // Start audio on the first real user gesture (autoplay policy)
+  ['pointerdown', 'keydown', 'touchstart'].forEach(evt => {
+    window.addEventListener(evt, ensureAudio, { once: true, passive: true });
+  });
+
+  // ── Mute toggle button ──────────────────────────────────────
+  const muteBtn = document.createElement('div');
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+  muteBtn.style.cssText = `
+    position:fixed; top:20px; left:24px;
+    width:40px; height:40px; border-radius:50%;
+    background:rgba(10,5,20,0.65); border:1px solid rgba(249,212,232,0.25);
+    color:#f9d4e8; font-size:1.1rem;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer; z-index:10; user-select:none;
+  `;
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    muteBtn.textContent = muted ? '🔇' : '🔊';
+    if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+    if (bgAudio) bgAudio.volume = muted ? 0 : 0.6;
+    try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (e) {}
+  });
+  document.body.appendChild(muteBtn);
+
+  console.log('[M7] Ambient audio ready 🎵');
+})();
+</script>
+
+</body>
+</html>
